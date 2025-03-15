@@ -242,9 +242,13 @@ def copy_contents_to_subfolders(service, source_folder_id, destination_folder_id
 
 # Telegram Bot Commands
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start the bot and reset any ongoing conversation."""
+    context.user_data.clear()
     await update.message.reply_text("Welcome to the Google Drive Manager Bot! Use /help to see all commands.")
+    return ConversationHandler.END
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show help message."""
     help_text = """
     Available commands:
     /start - Start the bot
@@ -259,6 +263,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(help_text)
 
 async def configuration(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start the Google Drive authorization flow."""
     global flow
     flow = InstalledAppFlow.from_client_secrets_file(
         "credentials.json", scopes=SCOPES, redirect_uri="urn:ietf:wg:oauth:2.0:oob"
@@ -269,8 +274,10 @@ async def configuration(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Please visit this link to authorize:\n{auth_url}\n\n"
         "After authorization, send the code you receive back here."
     )
+    return SOURCE_FOLDER
 
 async def handle_auth_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the authorization code from the user."""
     global flow
     if not flow:
         await update.message.reply_text("⚠️ No active authorization session. Use /configuration first.")
@@ -286,53 +293,72 @@ async def handle_auth_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Authorization failed: {str(e)}")
         logger.error(f"Authorization error: {e}")
+    return ConversationHandler.END
 
 async def copy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start the /copy command and ask for the source folder URL."""
     await update.message.reply_text("Please send the source folder URL:")
     return SOURCE_FOLDER
 
 async def source_folder_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["source_url"] = update.message.text
-    await update.message.reply_text("Please send the destination folder URL:")
-    return DESTINATION_FOLDER
+    """Handle the source folder URL and ask for the destination folder URL."""
+    try:
+        folder_id = extract_folder_id_from_url(update.message.text)
+        context.user_data["source_folder_id"] = folder_id
+        await update.message.reply_text("Please send the destination folder URL:")
+        return DESTINATION_FOLDER
+    except ValueError:
+        await update.message.reply_text("❌ Invalid folder URL. Please try again.")
+        return SOURCE_FOLDER
 
 async def destination_folder_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["destination_url"] = update.message.text
-    source_url = context.user_data["source_url"]
-    destination_url = context.user_data["destination_url"]
+    """Handle the destination folder URL and start the copy process."""
+    try:
+        folder_id = extract_folder_id_from_url(update.message.text)
+        context.user_data["destination_folder_id"] = folder_id
+        source_folder_id = context.user_data["source_folder_id"]
+        destination_folder_id = context.user_data["destination_folder_id"]
 
-    source_id = extract_folder_id_from_url(source_url)
-    destination_id = extract_folder_id_from_url(destination_url) if destination_url else None
+        total_items = count_files_in_folder(service, source_folder_id)
+        progress_tracker = ProgressTracker(total_items, update, context)
 
-    total_items = count_files_in_folder(service, source_id)
-    progress_tracker = ProgressTracker(total_items, update, context)
-
-    await update.message.reply_text(f"Copying {total_items} items...")
-    new_folder_id = copy_folder(service, source_id, destination_id, progress_tracker)
-    await update.message.reply_text(f"Folder copied successfully! New folder ID: {new_folder_id}")
+        await update.message.reply_text(f"Copying {total_items} items...")
+        new_folder_id = copy_folder(service, source_folder_id, destination_folder_id, progress_tracker)
+        await update.message.reply_text(f"Folder copied successfully! New folder ID: {new_folder_id}")
+    except ValueError:
+        await update.message.reply_text("❌ Invalid folder URL. Please try again.")
+        return DESTINATION_FOLDER
     return ConversationHandler.END
 
 async def rename_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start the /rename command and ask for the folder URL."""
     await update.message.reply_text("Please send the folder URL:")
     return SOURCE_FOLDER
 
 async def search_string_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["folder_url"] = update.message.text
-    await update.message.reply_text("Please send the search string:")
-    return SEARCH_STRING
+    """Handle the folder URL and ask for the search string."""
+    try:
+        folder_id = extract_folder_id_from_url(update.message.text)
+        context.user_data["folder_id"] = folder_id
+        await update.message.reply_text("Please send the search string:")
+        return SEARCH_STRING
+    except ValueError:
+        await update.message.reply_text("❌ Invalid folder URL. Please try again.")
+        return SOURCE_FOLDER
 
 async def replace_string_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the search string and ask for the replace string."""
     context.user_data["search_str"] = update.message.text
     await update.message.reply_text("Please send the replace string:")
     return REPLACE_STRING
 
 async def rename_files_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the replace string and start the rename process."""
     context.user_data["replace_str"] = update.message.text
-    folder_url = context.user_data["folder_url"]
+    folder_id = context.user_data["folder_id"]
     search_str = context.user_data["search_str"]
     replace_str = context.user_data["replace_str"]
 
-    folder_id = extract_folder_id_from_url(folder_url)
     total_items = count_files_in_folder(service, folder_id)
     progress_tracker = ProgressTracker(total_items, update, context)
 
@@ -343,7 +369,9 @@ async def rename_files_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     return ConversationHandler.END
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cancel the current operation."""
     await update.message.reply_text("Operation cancelled.")
+    context.user_data.clear()
     return ConversationHandler.END
 
 def main():
