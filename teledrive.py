@@ -1,13 +1,12 @@
 import os
+import logging
 import base64
 import json
-import logging
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
-import google.auth
-from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from concurrent.futures import ThreadPoolExecutor
@@ -32,6 +31,13 @@ BATCH_SIZE = 100
 
 # Global service object for Google Drive
 service = None
+
+# Initialize logging
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
 class ProgressTracker:
     """Track progress of an operation."""
@@ -60,11 +66,6 @@ def authenticate_google_drive():
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
-        else:
-            flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
-            creds = flow.run_local_server(port=0)
-        with open('token.json', 'w') as token:
-            token.write(creds.to_json())
     return creds
 
 def extract_folder_id_from_url(url):
@@ -91,7 +92,7 @@ def list_folder_items(service, folder_id):
             if not page_token:
                 break
         except HttpError as e:
-            logging.error(f"Listing error: {e}")
+            logger.error(f"Listing error: {e}")
             break
     return items
 
@@ -104,10 +105,10 @@ def process_batch_with_retry(service, batch):
         except HttpError as e:
             if e.resp.status == 429:
                 sleep_time = (2 ** attempt) + random.random()
-                logging.warning(f"Rate limited. Retrying in {sleep_time:.2f}s")
+                logger.warning(f"Rate limited. Retrying in {sleep_time:.2f}s")
                 time.sleep(sleep_time)
             else:
-                logging.error(f"Batch failed: {str(e)}")
+                logger.error(f"Batch failed: {str(e)}")
                 break
 
 def rename_files_in_folder(service, folder_id, search_str, replace_str, executor, progress_tracker):
