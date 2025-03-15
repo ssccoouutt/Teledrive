@@ -20,7 +20,6 @@ from concurrent.futures import ThreadPoolExecutor
 import threading
 import random
 import time
-import traceback
 
 # Environment variables
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -48,7 +47,7 @@ flow = None
 service = None
 
 # Conversation states
-AUTH_CODE, SOURCE_FOLDER, DESTINATION_FOLDER, SEARCH_STRING, REPLACE_STRING = range(5)
+SOURCE_FOLDER, DESTINATION_FOLDER, SEARCH_STRING, REPLACE_STRING = range(4)
 
 class ProgressTracker:
     """Track progress of an operation."""
@@ -203,6 +202,44 @@ def copy_folder(service, source_folder_id, parent_folder_id=None, progress_track
 
     return new_folder_id
 
+def copy_contents(service, source_folder_id, destination_folder_id, progress_tracker):
+    """Copy contents of a folder (excluding the folder itself) to a destination folder."""
+    items = list_folder_items(service, source_folder_id)
+
+    for item in items:
+        if item["mimeType"] == "application/vnd.google-apps.folder":
+            # Recursively copy subfolders
+            copy_folder(service, item["id"], destination_folder_id, progress_tracker)
+        else:
+            # Copy files
+            file_metadata = {"name": item["name"], "parents": [destination_folder_id]}
+            service.files().copy(fileId=item["id"], body=file_metadata).execute()
+            if progress_tracker:
+                progress_tracker.update_progress()
+
+def copy_contents_to_subfolders(service, source_folder_id, destination_folder_id, progress_tracker):
+    """Copy contents of a folder (excluding the folder itself) to another folder and its subfolders."""
+    # List all items in the source folder
+    source_items = list_folder_items(service, source_folder_id)
+
+    # List all subfolders in the destination folder
+    destination_items = list_folder_items(service, destination_folder_id)
+    destination_subfolders = [
+        item for item in destination_items if item["mimeType"] == "application/vnd.google-apps.folder"
+    ]
+
+    # Copy files to the destination folder
+    for item in source_items:
+        if item["mimeType"] != "application/vnd.google-apps.folder":
+            file_metadata = {"name": item["name"], "parents": [destination_folder_id]}
+            service.files().copy(fileId=item["id"], body=file_metadata).execute()
+            if progress_tracker:
+                progress_tracker.update_progress()
+
+    # Recursively copy files to subfolders
+    for subfolder in destination_subfolders:
+        copy_contents_to_subfolders(service, source_folder_id, subfolder["id"], progress_tracker)
+
 # Telegram Bot Commands
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start the bot and reset any ongoing conversation."""
@@ -237,7 +274,7 @@ async def configuration(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Please visit this link to authorize:\n{auth_url}\n\n"
         "After authorization, send the code you receive back here."
     )
-    return AUTH_CODE
+    return SOURCE_FOLDER
 
 async def handle_auth_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle the authorization code from the user."""
@@ -253,12 +290,9 @@ async def handle_auth_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with open("token.json", "w") as token:
             token.write(creds.to_json())
         await update.message.reply_text("✅ Authorization successful! You can now use the bot.")
-        # Clear user data to reset the state
-        context.user_data.clear()
     except Exception as e:
         await update.message.reply_text(f"❌ Authorization failed: {str(e)}")
         logger.error(f"Authorization error: {e}")
-        logger.error(f"Traceback: {traceback.format_exc()}")
     return ConversationHandler.END
 
 async def copy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -280,21 +314,40 @@ async def source_folder_handler(update: Update, context: ContextTypes.DEFAULT_TY
 async def destination_folder_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle the destination folder URL and start the copy process."""
     try:
-        folder_id = extract_folder_id_from_url(update.message.text)
-        context.user_data["destination_folder_id"] = folder_id
-        source_folder_id = context.user_data["source_folder_id"]
-        destination_folder_id = context.user_data["destination_folder_id"]
+        # Extract folder ID from the destination folder URL
+        destination_folder_id = extract_folder_id_from_url(update.message.text)
+        context.user_data["destination_folder_id"] = destination_folder_id
 
+        # Get the source folder ID from context
+        source_folder_id = context.user_data["source_folder_id"]
+
+        # Count total items to copy
         total_items = count_files_in_folder(service, source_folder_id)
         progress_tracker = ProgressTracker(total_items, update, context)
 
+        # Start the copy process
         await update.message.reply_text(f"Copying {total_items} items...")
         new_folder_id = copy_folder(service, source_folder_id, destination_folder_id, progress_tracker)
         await update.message.reply_text(f"Folder copied successfully! New folder ID: {new_folder_id}")
+
+        # Clear user data and end the conversation
+        context.user_data.clear()
+        return ConversationHandler.END
+
     except ValueError:
+        # Handle invalid folder URL
         await update.message.reply_text("❌ Invalid folder URL. Please try again.")
         return DESTINATION_FOLDER
-    return ConversationHandler.END
+    except HttpError as e:
+        # Handle Google Drive API errors
+        await update.message.reply_text(f"❌ Google Drive API error: {str(e)}")
+        logger.error(f"Google Drive API error: {e}")
+        return ConversationHandler.END
+    except Exception as e:
+        # Handle unexpected errors
+        await update.message.reply_text(f"❌ An error occurred: {str(e)}")
+        logger.error(f"Unexpected error: {e}")
+        return ConversationHandler.END
 
 async def rename_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start the /rename command and ask for the folder URL."""
@@ -352,16 +405,8 @@ def main():
     # Add handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
-
-    # Authorization handler
-    auth_handler = ConversationHandler(
-        entry_points=[CommandHandler("configuration", configuration)],
-        states={
-            AUTH_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_auth_code)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-    )
-    application.add_handler(auth_handler)
+    application.add_handler(CommandHandler("configuration", configuration))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_auth_code))
 
     # Conversation handler for /copy command
     copy_handler = ConversationHandler(
