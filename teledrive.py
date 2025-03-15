@@ -3,7 +3,14 @@ import logging
 import base64
 import json
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+    ConversationHandler,
+)
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
@@ -15,24 +22,23 @@ import random
 import time
 
 # Environment variables
-TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-GOOGLE_CREDENTIALS = os.getenv('GOOGLE_CREDENTIALS')
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+GOOGLE_CREDENTIALS = os.getenv("GOOGLE_CREDENTIALS")
 
 # Decode Google credentials
 if GOOGLE_CREDENTIALS:
-    creds_info = json.loads(base64.b64decode(GOOGLE_CREDENTIALS).decode('utf-8'))
-    with open('credentials.json', 'w') as creds_file:
+    creds_info = json.loads(base64.b64decode(GOOGLE_CREDENTIALS).decode("utf-8"))
+    with open("credentials.json", "w") as creds_file:
         json.dump(creds_info, creds_file)
 
 # Google Drive API setup
-SCOPES = ['https://www.googleapis.com/auth/drive']
+SCOPES = ["https://www.googleapis.com/auth/drive"]
 MAX_THREADS = 10
 BATCH_SIZE = 100
 
 # Initialize logging
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
@@ -40,8 +46,12 @@ logger = logging.getLogger(__name__)
 flow = None
 service = None
 
+# Conversation states
+SOURCE_FOLDER, DESTINATION_FOLDER, SEARCH_STRING, REPLACE_STRING = range(4)
+
 class ProgressTracker:
     """Track progress of an operation."""
+
     def __init__(self, total_items, update, context):
         self.total_items = total_items
         self.completed_items = 0
@@ -55,15 +65,14 @@ class ProgressTracker:
             self.completed_items += 1
             progress = (self.completed_items / self.total_items) * 100
             self.context.bot.send_message(
-                chat_id=self.update.effective_chat.id,
-                text=f"Progress: {progress:.2f}%"
+                chat_id=self.update.effective_chat.id, text=f"Progress: {progress:.2f}%"
             )
 
 def authenticate_google_drive():
     """Authenticate and return credentials."""
     creds = None
-    if os.path.exists('token.json'):
-        creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+    if os.path.exists("token.json"):
+        creds = Credentials.from_authorized_user_file("token.json", SCOPES)
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
     return creds
@@ -85,7 +94,7 @@ def list_folder_items(service, folder_id):
             results = service.files().list(
                 q=f"'{folder_id}' in parents",
                 fields="nextPageToken, files(id, name, mimeType)",
-                pageToken=page_token
+                pageToken=page_token,
             ).execute()
             items.extend(results.get("files", []))
             page_token = results.get("nextPageToken")
@@ -120,13 +129,10 @@ def rename_files_in_folder(service, folder_id, search_str, replace_str, executor
     # Process files in batches
     for i in range(0, len(files), BATCH_SIZE):
         batch = service.new_batch_http_request()
-        for file in files[i:i+BATCH_SIZE]:
+        for file in files[i : i + BATCH_SIZE]:
             if search_str in file["name"]:
                 new_name = file["name"].replace(search_str, replace_str)
-                request = service.files().update(
-                    fileId=file["id"],
-                    body={"name": new_name}
-                )
+                request = service.files().update(fileId=file["id"], body={"name": new_name})
                 batch.add(request)
         if batch._requests:
             process_batch_with_retry(service, batch)
@@ -135,15 +141,17 @@ def rename_files_in_folder(service, folder_id, search_str, replace_str, executor
     # Process subfolders in parallel
     futures = []
     for folder in folders:
-        futures.append(executor.submit(
-            rename_files_in_folder,
-            service,
-            folder["id"],
-            search_str,
-            replace_str,
-            executor,
-            progress_tracker
-        ))
+        futures.append(
+            executor.submit(
+                rename_files_in_folder,
+                service,
+                folder["id"],
+                search_str,
+                replace_str,
+                executor,
+                progress_tracker,
+            )
+        )
     for future in futures:
         future.result()
 
@@ -172,7 +180,7 @@ def copy_folder(service, source_folder_id, parent_folder_id=None, progress_track
     new_folder_metadata = {
         "name": folder_name,
         "mimeType": "application/vnd.google-apps.folder",
-        "parents": [parent_folder_id] if parent_folder_id else []
+        "parents": [parent_folder_id] if parent_folder_id else [],
     }
     new_folder = service.files().create(body=new_folder_metadata, fields="id").execute()
     new_folder_id = new_folder["id"]
@@ -216,7 +224,9 @@ def copy_contents_to_subfolders(service, source_folder_id, destination_folder_id
 
     # List all subfolders in the destination folder
     destination_items = list_folder_items(service, destination_folder_id)
-    destination_subfolders = [item for item in destination_items if item["mimeType"] == "application/vnd.google-apps.folder"]
+    destination_subfolders = [
+        item for item in destination_items if item["mimeType"] == "application/vnd.google-apps.folder"
+    ]
 
     # Copy files to the destination folder
     for item in source_items:
@@ -232,7 +242,7 @@ def copy_contents_to_subfolders(service, source_folder_id, destination_folder_id
 
 # Telegram Bot Commands
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text('Welcome to the Google Drive Manager Bot! Use /help to see all commands.')
+    await update.message.reply_text("Welcome to the Google Drive Manager Bot! Use /help to see all commands.")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = """
@@ -251,11 +261,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def configuration(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global flow
     flow = InstalledAppFlow.from_client_secrets_file(
-        'credentials.json',
-        scopes=SCOPES,
-        redirect_uri='urn:ietf:wg:oauth:2.0:oob'
+        "credentials.json", scopes=SCOPES, redirect_uri="urn:ietf:wg:oauth:2.0:oob"
     )
-    auth_url, _ = flow.authorization_url(prompt='consent')
+    auth_url, _ = flow.authorization_url(prompt="consent")
     await update.message.reply_text(
         f"🔑 **Authorization Required**\n\n"
         f"Please visit this link to authorize:\n{auth_url}\n\n"
@@ -272,16 +280,27 @@ async def handle_auth_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         flow.fetch_token(code=code)
         creds = flow.credentials
-        with open('token.json', 'w') as token:
+        with open("token.json", "w") as token:
             token.write(creds.to_json())
         await update.message.reply_text("✅ Authorization successful! You can now use the bot.")
     except Exception as e:
         await update.message.reply_text(f"❌ Authorization failed: {str(e)}")
         logger.error(f"Authorization error: {e}")
 
-async def copy_folder_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    source_url = context.args[0]
-    destination_url = context.args[1] if len(context.args) > 1 else None
+async def copy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Please send the source folder URL:")
+    return SOURCE_FOLDER
+
+async def source_folder_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["source_url"] = update.message.text
+    await update.message.reply_text("Please send the destination folder URL:")
+    return DESTINATION_FOLDER
+
+async def destination_folder_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["destination_url"] = update.message.text
+    source_url = context.user_data["source_url"]
+    destination_url = context.user_data["destination_url"]
+
     source_id = extract_folder_id_from_url(source_url)
     destination_id = extract_folder_id_from_url(destination_url) if destination_url else None
 
@@ -291,13 +310,29 @@ async def copy_folder_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     await update.message.reply_text(f"Copying {total_items} items...")
     new_folder_id = copy_folder(service, source_id, destination_id, progress_tracker)
     await update.message.reply_text(f"Folder copied successfully! New folder ID: {new_folder_id}")
+    return ConversationHandler.END
 
-async def rename_files_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    folder_url = context.args[0]
-    search_str = context.args[1]
-    replace_str = context.args[2]
+async def rename_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Please send the folder URL:")
+    return SOURCE_FOLDER
+
+async def search_string_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["folder_url"] = update.message.text
+    await update.message.reply_text("Please send the search string:")
+    return SEARCH_STRING
+
+async def replace_string_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["search_str"] = update.message.text
+    await update.message.reply_text("Please send the replace string:")
+    return REPLACE_STRING
+
+async def rename_files_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["replace_str"] = update.message.text
+    folder_url = context.user_data["folder_url"]
+    search_str = context.user_data["search_str"]
+    replace_str = context.user_data["replace_str"]
+
     folder_id = extract_folder_id_from_url(folder_url)
-
     total_items = count_files_in_folder(service, folder_id)
     progress_tracker = ProgressTracker(total_items, update, context)
 
@@ -305,38 +340,11 @@ async def rename_files_command(update: Update, context: ContextTypes.DEFAULT_TYP
     with ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
         rename_files_in_folder(service, folder_id, search_str, replace_str, executor, progress_tracker)
     await update.message.reply_text("Renaming completed!")
+    return ConversationHandler.END
 
-async def count_files_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    folder_url = context.args[0]
-    folder_id = extract_folder_id_from_url(folder_url)
-    total_files = count_files_in_folder(service, folder_id)
-    await update.message.reply_text(f"Total files in folder and subfolders: {total_files}")
-
-async def copy_contents_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    source_url = context.args[0]
-    destination_url = context.args[1]
-    source_id = extract_folder_id_from_url(source_url)
-    destination_id = extract_folder_id_from_url(destination_url)
-
-    total_items = count_files_in_folder(service, source_id)
-    progress_tracker = ProgressTracker(total_items, update, context)
-
-    await update.message.reply_text(f"Copying {total_items} items...")
-    copy_contents(service, source_id, destination_id, progress_tracker)
-    await update.message.reply_text("Contents copied successfully!")
-
-async def copy_to_subfolders_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    source_url = context.args[0]
-    destination_url = context.args[1]
-    source_id = extract_folder_id_from_url(source_url)
-    destination_id = extract_folder_id_from_url(destination_url)
-
-    total_items = count_files_in_folder(service, source_id)
-    progress_tracker = ProgressTracker(total_items, update, context)
-
-    await update.message.reply_text(f"Copying {total_items} items...")
-    copy_contents_to_subfolders(service, source_id, destination_id, progress_tracker)
-    await update.message.reply_text("Contents copied to subfolders successfully!")
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Operation cancelled.")
+    return ConversationHandler.END
 
 def main():
     global service
@@ -352,14 +360,33 @@ def main():
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("configuration", configuration))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_auth_code))
-    application.add_handler(CommandHandler("copy", copy_folder_command))
-    application.add_handler(CommandHandler("rename", rename_files_command))
-    application.add_handler(CommandHandler("count", count_files_command))
-    application.add_handler(CommandHandler("copy_contents", copy_contents_command))
-    application.add_handler(CommandHandler("copy_to_subfolders", copy_to_subfolders_command))
+
+    # Conversation handler for /copy command
+    copy_handler = ConversationHandler(
+        entry_points=[CommandHandler("copy", copy_command)],
+        states={
+            SOURCE_FOLDER: [MessageHandler(filters.TEXT & ~filters.COMMAND, source_folder_handler)],
+            DESTINATION_FOLDER: [MessageHandler(filters.TEXT & ~filters.COMMAND, destination_folder_handler)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
+
+    # Conversation handler for /rename command
+    rename_handler = ConversationHandler(
+        entry_points=[CommandHandler("rename", rename_command)],
+        states={
+            SOURCE_FOLDER: [MessageHandler(filters.TEXT & ~filters.COMMAND, search_string_handler)],
+            SEARCH_STRING: [MessageHandler(filters.TEXT & ~filters.COMMAND, replace_string_handler)],
+            REPLACE_STRING: [MessageHandler(filters.TEXT & ~filters.COMMAND, rename_files_handler)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
+
+    application.add_handler(copy_handler)
+    application.add_handler(rename_handler)
 
     # Start the bot
     application.run_polling()
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
