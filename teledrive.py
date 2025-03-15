@@ -29,15 +29,16 @@ SCOPES = ['https://www.googleapis.com/auth/drive']
 MAX_THREADS = 10
 BATCH_SIZE = 100
 
-# Global service object for Google Drive
-service = None
-
 # Initialize logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+# Global variables
+flow = None
+service = None
 
 class ProgressTracker:
     """Track progress of an operation."""
@@ -63,7 +64,6 @@ def authenticate_google_drive():
     creds = None
     if os.path.exists('token.json'):
         creds = Credentials.from_authorized_user_file('token.json', SCOPES)
-    if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
     return creds
@@ -237,29 +237,47 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = """
     Available commands:
+    /start - Start the bot
+    /help - Show this help message
+    /configuration - Authorize Google Drive
     /copy - Copy Google Drive Folder
     /rename - Fast Rename Files (Search & Replace)
     /count - Count Files
     /copy_contents - Copy contents to another folder
     /copy_to_subfolders - Copy contents to another folder and its subfolders
-    /configuration - Configure Google Drive credentials
     """
     await update.message.reply_text(help_text)
 
 async def configuration(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
+    global flow
+    flow = InstalledAppFlow.from_client_secrets_file(
+        'credentials.json',
+        scopes=SCOPES,
+        redirect_uri='urn:ietf:wg:oauth:2.0:oob'
+    )
     auth_url, _ = flow.authorization_url(prompt='consent')
-    await update.message.reply_text(f'Please visit this URL to authorize the application: {auth_url}')
-    await update.message.reply_text('After authorization, send the code you received here.')
+    await update.message.reply_text(
+        f"🔑 **Authorization Required**\n\n"
+        f"Please visit this link to authorize:\n{auth_url}\n\n"
+        "After authorization, send the code you receive back here."
+    )
 
 async def handle_auth_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    code = update.message.text
-    flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
-    flow.fetch_token(code=code)
-    creds = flow.credentials
-    with open('token.json', 'w') as token:
-        token.write(creds.to_json())
-    await update.message.reply_text('Authorization successful! You can now use the bot.')
+    global flow
+    if not flow:
+        await update.message.reply_text("⚠️ No active authorization session. Use /configuration first.")
+        return
+
+    code = update.message.text.strip()
+    try:
+        flow.fetch_token(code=code)
+        creds = flow.credentials
+        with open('token.json', 'w') as token:
+            token.write(creds.to_json())
+        await update.message.reply_text("✅ Authorization successful! You can now use the bot.")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Authorization failed: {str(e)}")
+        logger.error(f"Authorization error: {e}")
 
 async def copy_folder_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     source_url = context.args[0]
@@ -323,10 +341,13 @@ async def copy_to_subfolders_command(update: Update, context: ContextTypes.DEFAU
 def main():
     global service
     creds = authenticate_google_drive()
-    service = build("drive", "v3", credentials=creds)
+    if creds:
+        service = build("drive", "v3", credentials=creds)
 
+    # Build the Telegram bot
     application = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
+    # Add handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("configuration", configuration))
@@ -337,6 +358,7 @@ def main():
     application.add_handler(CommandHandler("copy_contents", copy_contents_command))
     application.add_handler(CommandHandler("copy_to_subfolders", copy_to_subfolders_command))
 
+    # Start the bot
     application.run_polling()
 
 if __name__ == '__main__':
