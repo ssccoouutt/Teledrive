@@ -32,22 +32,17 @@ def initialize_banned_items():
                 data = json.load(f)
                 if 'files' in data and 'folders' in data:
                     return data
-        # If file doesn't exist or invalid structure, create default
         with open(BANNED_ITEMS_FILE, 'w') as f:
             json.dump(default, f)
         return default
-    except Exception as e:
-        print(f"Error initializing banned items: {str(e)}")
+    except Exception:
         return default
 
 banned_items = initialize_banned_items()
 
 def save_banned_items():
-    try:
-        with open(BANNED_ITEMS_FILE, 'w') as f:
-            json.dump(banned_items, f, indent=2)
-    except Exception as e:
-        print(f"Error saving banned items: {str(e)}")
+    with open(BANNED_ITEMS_FILE, 'w') as f:
+        json.dump(banned_items, f, indent=2)
 
 def get_drive_service():
     creds = None
@@ -232,9 +227,36 @@ def rename_video_files(service, folder_id):
         if not page_token:
             break
 
+def sanitize_html(html):
+    """Ensure all HTML tags are properly closed"""
+    stack = []
+    tags = re.finditer(r'<(/?)([a-zA-Z]+)([^>]*)>', html)
+    
+    for match in tags:
+        is_closing, tag_name = match.group(1), match.group(2).lower()
+        if not is_closing:
+            stack.append(tag_name)
+        else:
+            while stack and stack[-1] != tag_name:
+                stack.pop()
+            if stack and stack[-1] == tag_name:
+                stack.pop()
+
+    sanitized = html
+    for tag in reversed(stack):
+        sanitized += f'</{tag}>'
+    
+    return sanitized
+
 def convert_to_html(text, entities):
     html = text
-    for entity in sorted(entities, key=lambda x: x.offset, reverse=True):
+    valid_entities = sorted(
+        [e for e in entities if (e.offset + e.length) <= len(text)],
+        key=lambda x: x.offset,
+        reverse=True
+    )
+    
+    for entity in valid_entities:
         start = entity.offset
         end = entity.offset + entity.length
         content = html[start:end]
@@ -282,7 +304,7 @@ def process_content(original_html, drive_links):
     original_html = re.sub(r'<([a-z]+)([^>]*)(?<!/)>$', '', original_html)
     original_html = re.sub(r'<([a-z]+)([^>]*)></\1>', '', original_html)
     
-    return original_html.strip()
+    return sanitize_html(original_html.strip())
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
