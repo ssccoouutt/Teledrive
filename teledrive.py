@@ -35,7 +35,6 @@ logger = logging.getLogger(__name__)
 # Global variables
 flow = None
 pending_authorizations = {}
-processing_tasks = {}
 
 # Initialize credentials file
 if GOOGLE_CREDENTIALS and not os.path.exists(CLIENT_SECRET_FILE):
@@ -115,7 +114,11 @@ async def start_authorization(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def handle_authorization_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
-    code = update.message.text.strip()
+    code = update.message.text.strip() if update.message.text else None
+    
+    if not code:
+        await update.message.reply_text("⚠️ Please provide a valid authorization code.")
+        return
     
     if user_id not in pending_authorizations:
         await update.message.reply_text("⚠️ No pending authorization request. Start with /start")
@@ -135,236 +138,29 @@ async def handle_authorization_code(update: Update, context: ContextTypes.DEFAUL
         await update.message.reply_text("❌ Invalid authorization code. Please try again.")
 
 def extract_folder_id(url):
+    if not url:
+        return None
     match = re.search(r'/folders/([a-zA-Z0-9-_]+)', url)
     return match.group(1) if match else None
 
 def should_skip_item(name):
     return name in banned_items['files'] or name in banned_items['folders']
 
-def copy_folder(service, folder_id):
-    try:
-        # Create main folder copy
-        folder = service.files().get(fileId=folder_id, fields='name').execute()
-        new_folder = service.files().create(body={
-            'name': folder['name'],
-            'mimeType': 'application/vnd.google-apps.folder'
-        }).execute()
-        new_folder_id = new_folder['id']
-
-        # Phase 1: Copy original structure
-        copy_folder_contents(service, folder_id, new_folder_id)
-
-        # Phase 2: Add files to all subfolders
-        subfolders = get_all_subfolders_recursive(service, new_folder_id)
-        for subfolder_id in subfolders:
-            copy_files_only(service, PHASE2_SOURCE, subfolder_id, overwrite=True)
-
-        # Phase 3: Add content to root
-        copy_bonus_content(service, PHASE3_SOURCE, new_folder_id, overwrite=True)
-
-        # Rename video files
-        rename_video_files(service, new_folder_id)
-        for subfolder_id in subfolders:
-            rename_video_files(service, subfolder_id)
-
-        return new_folder_id
-    except Exception as e:
-        raise Exception(f"Copy failed: {str(e)}")
-
-def get_all_subfolders_recursive(service, folder_id):
-    subfolders = []
-    queue = [folder_id]
-    
-    while queue:
-        current_folder = queue.pop(0)
-        page_token = None
-        
-        while True:
-            response = service.files().list(
-                q=f"'{current_folder}' in parents and mimeType='application/vnd.google-apps.folder'",
-                fields='nextPageToken, files(id)',
-                pageToken=page_token
-            ).execute()
-            
-            new_folders = response.get('files', [])
-            for folder in new_folders:
-                subfolders.append(folder['id'])
-                queue.append(folder['id'])
-            
-            page_token = response.get('nextPageToken')
-            if not page_token:
-                break
-    
-    return subfolders
-
-def copy_files_only(service, source_id, dest_id, overwrite=False):
-    page_token = None
-    while True:
-        response = service.files().list(
-            q=f"'{source_id}' in parents",
-            fields='nextPageToken, files(id, name, mimeType)',
-            pageToken=page_token
-        ).execute()
-        
-        for item in response.get('files', []):
-            if should_skip_item(item['name']):
-                continue
-            if item['mimeType'] != 'application/vnd.google-apps.folder':
-                copy_item_to_folder(service, item, dest_id, overwrite)
-        
-        page_token = response.get('nextPageToken')
-        if not page_token:
-            break
-
-def copy_bonus_content(service, source_id, dest_id, overwrite=False):
-    page_token = None
-    while True:
-        response = service.files().list(
-            q=f"'{source_id}' in parents",
-            fields='nextPageToken, files(id, name, mimeType)',
-            pageToken=page_token
-        ).execute()
-        
-        for item in response.get('files', []):
-            if should_skip_item(item['name']):
-                continue
-            copy_item_to_folder(service, item, dest_id, overwrite)
-        
-        page_token = response.get('nextPageToken')
-        if not page_token:
-            break
-
-def copy_item_to_folder(service, item, dest_folder_id, overwrite=False):
-    try:
-        if overwrite:
-            existing = service.files().list(
-                q=f"name='{item['name']}' and '{dest_folder_id}' in parents",
-                fields='files(id)'
-            ).execute().get('files', [])
-            
-            for file in existing:
-                service.files().delete(fileId=file['id']).execute()
-
-        if item['mimeType'] == 'application/vnd.google-apps.folder':
-            new_folder = service.files().create(body={
-                'name': item['name'],
-                'parents': [dest_folder_id],
-                'mimeType': 'application/vnd.google-apps.folder'
-            }).execute()
-            copy_bonus_content(service, item['id'], new_folder['id'], overwrite)
-        else:
-            service.files().copy(
-                fileId=item['id'],
-                body={'parents': [dest_folder_id]}
-            ).execute()
-    except Exception as e:
-        print(f"Error copying {item['name']}: {str(e)}")
-
-def copy_folder_contents(service, source_id, dest_id):
-    page_token = None
-    while True:
-        response = service.files().list(
-            q=f"'{source_id}' in parents",
-            fields='nextPageToken, files(id, name, mimeType)',
-            pageToken=page_token
-        ).execute()
-        
-        for item in response.get('files', []):
-            if should_skip_item(item['name']):
-                continue
-                
-            if item['mimeType'] == 'application/vnd.google-apps.folder':
-                new_subfolder = service.files().create(body={
-                    'name': item['name'],
-                    'parents': [dest_id],
-                    'mimeType': 'application/vnd.google-apps.folder'
-                }).execute()
-                copy_folder_contents(service, item['id'], new_subfolder['id'])
-            else:
-                service.files().copy(
-                    fileId=item['id'],
-                    body={'parents': [dest_id]}
-                ).execute()
-        
-        page_token = response.get('nextPageToken')
-        if not page_token:
-            break
-
-def rename_video_files(service, folder_id):
-    page_token = None
-    while True:
-        response = service.files().list(
-            q=f"'{folder_id}' in parents and mimeType='video/mp4'",
-            fields='nextPageToken, files(id,name)',
-            pageToken=page_token
-        ).execute()
-        
-        for item in response.get('files', []):
-            if item['name'].endswith('.mp4'):
-                new_name = item['name'].replace('.mp4', ' (Telegram@TechZoneX.mp4)')
-                service.files().update(
-                    fileId=item['id'],
-                    body={'name': new_name}
-                ).execute()
-        
-        page_token = response.get('nextPageToken')
-        if not page_token:
-            break
-
-def convert_to_html(text, entities):
-    html = text
-    for entity in sorted(entities, key=lambda x: x.offset, reverse=True):
-        start = entity.offset
-        end = entity.offset + entity.length
-        content = html[start:end]
-        
-        if entity.type == 'bold':
-            replacement = f"<b>{content}</b>"
-        elif entity.type == 'italic':
-            replacement = f"<i>{content}</i>"
-        elif entity.type == 'underline':
-            replacement = f"<u>{content}</u>"
-        elif entity.type == 'strikethrough':
-            replacement = f"<s>{content}</s>"
-        elif entity.type == 'code':
-            replacement = f"<code>{content}</code>"
-        elif entity.type == 'pre':
-            replacement = f"<pre>{content}</pre>"
-        elif entity.type == 'text_link':
-            replacement = f'<a href="{entity.url}">{content}</a>'
-        else:
-            continue
-        
-        html = html[:start] + replacement + html[end:]
-    return html
-
-def process_content(original_html, drive_links):
-    for old_url, new_url in drive_links:
-        old_url_clean = re.escape(old_url)
-        pattern = re.compile(
-            fr'(<a\s[^>]*?href\s*=\s*["\']{old_url_clean}(?:[^"\'>]*?)["\'][^>]*>.*?</a>)|({old_url_clean}[^\s<]*)',
-            flags=re.IGNORECASE
-        )
-        original_html = pattern.sub(new_url, original_html)
-    
-    # Clean residual HTML
-    original_html = re.sub(r'<([a-z]+)([^>]*)(?<!/)>$', '', original_html)
-    original_html = re.sub(r'<([a-z]+)([^>]*)></\1>', '', original_html)
-    
-    return original_html.strip()
-
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
-    user_id = update.message.from_user.id
-    
+    if not message or (message.text and message.text.startswith('/')):
+        return
+
     # Check for authorization code first
-    if re.match(r'^\d+/[\w-]+$', message.text.strip()):
+    if message.text and re.match(r'^\d+/[\w-]+$', message.text.strip()):
         await handle_authorization_code(update, context)
         return
 
     # Handle Drive links
-    if 'drive.google.com' in message.text and '/folders/' in message.text:
+    if message.text and 'drive.google.com' in message.text and '/folders/' in message.text:
+        user_id = update.message.from_user.id
         service = get_drive_service(user_id)
+        
         if not service:
             await start_authorization(update, context)
             return
@@ -438,39 +234,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Handle non-Drive link messages
         await context.bot.send_message(
             chat_id=TARGET_CHANNEL,
-            text=message.text,
+            text=message.text or "No valid content found.",
             parse_mode='HTML'
         )
-
-async def ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        if not context.args:
-            await update.message.reply_text("❌ Usage: /ban <filename_or_folder>")
-            return
-
-        item_name = ' '.join(context.args).strip()
-        if not item_name:
-            await update.message.reply_text("❌ Empty name provided")
-            return
-
-        if '.' in item_name.split('/')[-1]:
-            if item_name not in banned_items['files']:
-                banned_items['files'].append(item_name)
-                response_text = f"✅ Banned file: {item_name}"
-            else:
-                response_text = f"⚠️ File already banned: {item_name}"
-        else:
-            if item_name not in banned_items['folders']:
-                banned_items['folders'].append(item_name)
-                response_text = f"✅ Banned folder: {item_name}"
-            else:
-                response_text = f"⚠️ Folder already banned: {item_name}"
-        
-        save_banned_items()
-        await update.message.reply_text(response_text)
-
-    except Exception as e:
-        await update.message.reply_text(f"⚠️ Ban failed: {str(e)}")
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     error = context.error
@@ -493,7 +259,6 @@ def main():
     
     # Command handlers
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("ban", ban))
     
     # Message handler
     application.add_handler(MessageHandler(
