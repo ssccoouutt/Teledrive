@@ -3,6 +3,7 @@ import os
 import json
 import random
 import asyncio
+import traceback
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from google.auth.transport.requests import Request
@@ -419,12 +420,18 @@ async def ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     error = context.error
-    print(f"Error: {str(error)}")
-    if update.effective_message:
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text="⚠️ An error occurred. Please check the format and try again."
-        )
+    tb_list = traceback.format_exception(type(error), error, error.__traceback__)
+    tb_string = ''.join(tb_list)
+    print(f"Exception occurred:\n{tb_string}")
+    
+    try:
+        if update and update.effective_chat:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text="⚠️ An error occurred. Please check the format and try again."
+            )
+    except Exception as e:
+        print(f"Error in error handler while sending message: {e}")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
