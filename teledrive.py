@@ -1,542 +1,512 @@
+import re
 import os
-import base64
 import json
-import time
 import random
-import threading
-from concurrent.futures import ThreadPoolExecutor
-from google.auth.transport.requests import Request
+import asyncio
+import base64
+import logging
+from collections import defaultdict
 from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
-from telegram import Update, ReplyKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
+from google.auth.transport.requests import Request
+from google_auth_oauthlib.flow import Flow
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 # Configuration
-SCOPES = ["https://www.googleapis.com/auth/drive"]
-MAX_THREADS = 10
-BATCH_SIZE = 100
-UNPOSTED_FOLDER_ID = "14tf687_8F4o2oYJTqyCZmvJjq45jRliy"
-SECOND_SOURCE_FOLDER_ID = "12V7EnRIYcSgEtt0PR5fhV8cO22nzYuiv"
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+GOOGLE_CREDENTIALS = os.getenv("GOOGLE_CREDENTIALS")  # Base64 encoded
+SCOPES = ['https://www.googleapis.com/auth/drive']
+CLIENT_SECRET_FILE = 'credentials.json'
+TOKEN_FILE = 'token.json'
+PHASE2_SOURCE = '1TaBiq6z01lLP-znWMz1S_RwJ1PkLRyjk'
+PHASE3_SOURCE = '12V7EnRIYcSgEtt0PR5fhV8cO22nzYuiv'
+SHORT_LINKS = ["rb.gy/cd8ugy", "bit.ly/3UcvhlA", "t.ly/CfcVB", "cutt.ly/Kee3oiLO"]
+TARGET_CHANNEL = "@techworld196"
+BANNED_ITEMS_FILE = 'banned_items.json'
 
-# Telegram Bot Token from environment variable
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+# Initialize logging
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
-# Decode credentials.json from Base64
-CREDENTIALS_JSON = base64.b64decode(os.getenv("CREDENTIALS_JSON")).decode("utf-8")
-with open("credentials.json", "w") as cred_file:
-    cred_file.write(CREDENTIALS_JSON)
+# Global variables
+flow = None
+pending_authorizations = {}
+processing_tasks = {}
 
-# Global variables for conversation states
-AUTH_CODE, FOLDER_URL, SEARCH_STR, REPLACE_STR, SOURCE_URL, DESTINATION_URL = range(6)
+# Initialize credentials file
+if GOOGLE_CREDENTIALS and not os.path.exists(CLIENT_SECRET_FILE):
+    try:
+        with open(CLIENT_SECRET_FILE, 'w') as f:
+            f.write(base64.b64decode(GOOGLE_CREDENTIALS).decode())
+    except Exception as e:
+        logger.error(f"Failed to create credentials.json: {e}")
+        raise
 
+def initialize_banned_items():
+    default = {
+        'files': ['100$ Free.docx', 'Free Courses.pdf'],
+        'folders': ['00- Join LearnWithFaizan']
+    }
+    
+    if not os.path.exists(BANNED_ITEMS_FILE):
+        with open(BANNED_ITEMS_FILE, 'w') as f:
+            json.dump(default, f)
+        return default
+    
+    try:
+        with open(BANNED_ITEMS_FILE, 'r') as f:
+            data = json.load(f)
+            if 'files' not in data or 'folders' not in data:
+                raise ValueError("Invalid banned items structure")
+            return data
+    except (json.JSONDecodeError, ValueError):
+        with open(BANNED_ITEMS_FILE, 'w') as f:
+            json.dump(default, f)
+        return default
 
-class ProgressTracker:
-    """Track progress of an operation."""
+banned_items = initialize_banned_items()
 
-    def __init__(self, total_items):
-        self.total_items = total_items
-        self.completed_items = 0
-        self.lock = threading.Lock()
+def save_banned_items():
+    with open(BANNED_ITEMS_FILE, 'w') as f:
+        json.dump(banned_items, f, indent=2)
 
-    def update(self):
-        """Increment the completed items counter."""
-        with self.lock:
-            self.completed_items += 1
-            self.display_progress()
-
-    def display_progress(self):
-        """Display the current progress percentage."""
-        progress = (self.completed_items / self.total_items) * 100
-        print(f"Progress: {progress:.2f}%", end="\r")
-
-
-def authenticate_google_drive():
-    """Authenticate and return credentials."""
+def get_drive_service(user_id):
     creds = None
-    if os.path.exists("token.json"):
-        try:
-            creds = Credentials.from_authorized_user_file("token.json", SCOPES)
-            if not creds or not creds.valid:
-                if creds and creds.expired and creds.refresh_token:
-                    creds.refresh(Request())
-        except Exception as e:
-            print(f"Error loading credentials: {e}")
-            os.remove("token.json")  # Delete invalid token file
-            creds = None
-
+    if os.path.exists(TOKEN_FILE):
+        creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
+    
     if not creds or not creds.valid:
-        flow = InstalledAppFlow.from_client_secrets_file("credentials.json", SCOPES)
-        auth_url, _ = flow.authorization_url(prompt="consent")
-        return flow, auth_url
-    return creds, None
+        if creds and creds.expired and creds.refresh_token:
+            try:
+                creds.refresh(Request())
+            except Exception as e:
+                logger.error(f"Refresh error: {e}")
+                return None
+        else:
+            return None
+    
+    return build('drive', 'v3', credentials=creds)
 
+async def start_authorization(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global flow
+    user_id = update.message.from_user.id
+    
+    try:
+        flow = Flow.from_client_secrets_file(
+            CLIENT_SECRET_FILE,
+            scopes=SCOPES,
+            redirect_uri='urn:ietf:wg:oauth:2.0:oob'
+        )
+        auth_url, _ = flow.authorization_url(prompt='consent')
+        pending_authorizations[user_id] = flow
+        
+        await update.message.reply_text(
+            f"🔑 Authorization required!\n\n"
+            f"Please visit this link to authorize:\n{auth_url}\n\n"
+            "After authorization, send the code you receive back here."
+        )
+    except Exception as e:
+        logger.error(f"Authorization error: {e}")
+        await update.message.reply_text("❌ Authorization setup failed. Please try again.")
 
-def extract_folder_id_from_url(url):
-    """Extract folder ID from Google Drive URL."""
-    if "folders/" in url:
-        return url.split("folders/")[1].split("?")[0]
-    elif "file/d/" in url:
-        return url.split("file/d/")[1].split("/")[0]
-    raise ValueError("Invalid Google Drive URL")
+async def handle_authorization_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    code = update.message.text.strip()
+    
+    if user_id not in pending_authorizations:
+        await update.message.reply_text("⚠️ No pending authorization request. Start with /start")
+        return
+    
+    try:
+        flow = pending_authorizations[user_id]
+        flow.fetch_token(code=code)
+        
+        with open(TOKEN_FILE, 'w') as token_file:
+            token_file.write(flow.credentials.to_json())
+        
+        del pending_authorizations[user_id]
+        await update.message.reply_text("✅ Authorization successful! You can now use Drive features.")
+    except Exception as e:
+        logger.error(f"Token exchange error: {e}")
+        await update.message.reply_text("❌ Invalid authorization code. Please try again.")
 
+def extract_folder_id(url):
+    match = re.search(r'/folders/([a-zA-Z0-9-_]+)', url)
+    return match.group(1) if match else None
 
-def list_folder_items(service, folder_id):
-    """List all items in a folder with pagination handling."""
-    items = []
-    page_token = None
-    while True:
-        try:
-            results = service.files().list(
-                q=f"'{folder_id}' in parents",
-                fields="nextPageToken, files(id, name, mimeType)",
-                pageToken=page_token,
+def should_skip_item(name):
+    return name in banned_items['files'] or name in banned_items['folders']
+
+def copy_folder(service, folder_id):
+    try:
+        # Create main folder copy
+        folder = service.files().get(fileId=folder_id, fields='name').execute()
+        new_folder = service.files().create(body={
+            'name': folder['name'],
+            'mimeType': 'application/vnd.google-apps.folder'
+        }).execute()
+        new_folder_id = new_folder['id']
+
+        # Phase 1: Copy original structure
+        copy_folder_contents(service, folder_id, new_folder_id)
+
+        # Phase 2: Add files to all subfolders
+        subfolders = get_all_subfolders_recursive(service, new_folder_id)
+        for subfolder_id in subfolders:
+            copy_files_only(service, PHASE2_SOURCE, subfolder_id, overwrite=True)
+
+        # Phase 3: Add content to root
+        copy_bonus_content(service, PHASE3_SOURCE, new_folder_id, overwrite=True)
+
+        # Rename video files
+        rename_video_files(service, new_folder_id)
+        for subfolder_id in subfolders:
+            rename_video_files(service, subfolder_id)
+
+        return new_folder_id
+    except Exception as e:
+        raise Exception(f"Copy failed: {str(e)}")
+
+def get_all_subfolders_recursive(service, folder_id):
+    subfolders = []
+    queue = [folder_id]
+    
+    while queue:
+        current_folder = queue.pop(0)
+        page_token = None
+        
+        while True:
+            response = service.files().list(
+                q=f"'{current_folder}' in parents and mimeType='application/vnd.google-apps.folder'",
+                fields='nextPageToken, files(id)',
+                pageToken=page_token
             ).execute()
-            items.extend(results.get("files", []))
-            page_token = results.get("nextPageToken")
+            
+            new_folders = response.get('files', [])
+            for folder in new_folders:
+                subfolders.append(folder['id'])
+                queue.append(folder['id'])
+            
+            page_token = response.get('nextPageToken')
             if not page_token:
                 break
-        except HttpError as e:
-            print(f"Listing error: {e}")
+    
+    return subfolders
+
+def copy_files_only(service, source_id, dest_id, overwrite=False):
+    page_token = None
+    while True:
+        response = service.files().list(
+            q=f"'{source_id}' in parents",
+            fields='nextPageToken, files(id, name, mimeType)',
+            pageToken=page_token
+        ).execute()
+        
+        for item in response.get('files', []):
+            if should_skip_item(item['name']):
+                continue
+            if item['mimeType'] != 'application/vnd.google-apps.folder':
+                copy_item_to_folder(service, item, dest_id, overwrite)
+        
+        page_token = response.get('nextPageToken')
+        if not page_token:
             break
-    return items
 
+def copy_bonus_content(service, source_id, dest_id, overwrite=False):
+    page_token = None
+    while True:
+        response = service.files().list(
+            q=f"'{source_id}' in parents",
+            fields='nextPageToken, files(id, name, mimeType)',
+            pageToken=page_token
+        ).execute()
+        
+        for item in response.get('files', []):
+            if should_skip_item(item['name']):
+                continue
+            copy_item_to_folder(service, item, dest_id, overwrite)
+        
+        page_token = response.get('nextPageToken')
+        if not page_token:
+            break
 
-def process_batch_with_retry(service, batch):
-    """Execute batch request with retry logic."""
-    for attempt in range(3):
-        try:
-            batch.execute()
-            return
-        except HttpError as e:
-            if e.resp.status == 429:
-                sleep_time = (2**attempt) + random.random()
-                print(f"Rate limited. Retrying in {sleep_time:.2f}s")
-                time.sleep(sleep_time)
+def copy_item_to_folder(service, item, dest_folder_id, overwrite=False):
+    try:
+        if overwrite:
+            existing = service.files().list(
+                q=f"name='{item['name']}' and '{dest_folder_id}' in parents",
+                fields='files(id)'
+            ).execute().get('files', [])
+            
+            for file in existing:
+                service.files().delete(fileId=file['id']).execute()
+
+        if item['mimeType'] == 'application/vnd.google-apps.folder':
+            new_folder = service.files().create(body={
+                'name': item['name'],
+                'parents': [dest_folder_id],
+                'mimeType': 'application/vnd.google-apps.folder'
+            }).execute()
+            copy_bonus_content(service, item['id'], new_folder['id'], overwrite)
+        else:
+            service.files().copy(
+                fileId=item['id'],
+                body={'parents': [dest_folder_id]}
+            ).execute()
+    except Exception as e:
+        print(f"Error copying {item['name']}: {str(e)}")
+
+def copy_folder_contents(service, source_id, dest_id):
+    page_token = None
+    while True:
+        response = service.files().list(
+            q=f"'{source_id}' in parents",
+            fields='nextPageToken, files(id, name, mimeType)',
+            pageToken=page_token
+        ).execute()
+        
+        for item in response.get('files', []):
+            if should_skip_item(item['name']):
+                continue
+                
+            if item['mimeType'] == 'application/vnd.google-apps.folder':
+                new_subfolder = service.files().create(body={
+                    'name': item['name'],
+                    'parents': [dest_id],
+                    'mimeType': 'application/vnd.google-apps.folder'
+                }).execute()
+                copy_folder_contents(service, item['id'], new_subfolder['id'])
             else:
-                print(f"Batch failed: {str(e)}")
-                break
+                service.files().copy(
+                    fileId=item['id'],
+                    body={'parents': [dest_id]}
+                ).execute()
+        
+        page_token = response.get('nextPageToken')
+        if not page_token:
+            break
 
+def rename_video_files(service, folder_id):
+    page_token = None
+    while True:
+        response = service.files().list(
+            q=f"'{folder_id}' in parents and mimeType='video/mp4'",
+            fields='nextPageToken, files(id,name)',
+            pageToken=page_token
+        ).execute()
+        
+        for item in response.get('files', []):
+            if item['name'].endswith('.mp4'):
+                new_name = item['name'].replace('.mp4', ' (Telegram@TechZoneX.mp4)')
+                service.files().update(
+                    fileId=item['id'],
+                    body={'name': new_name}
+                ).execute()
+        
+        page_token = response.get('nextPageToken')
+        if not page_token:
+            break
 
-def rename_files_in_folder(service, folder_id, search_str, replace_str, executor, progress_tracker):
-    """Fast rename using batch requests and multithreading."""
-    items = list_folder_items(service, folder_id)
-    files = [item for item in items if item["mimeType"] != "application/vnd.google-apps.folder"]
-    folders = [item for item in items if item["mimeType"] == "application/vnd.google-apps.folder"]
+def convert_to_html(text, entities):
+    html = text
+    for entity in sorted(entities, key=lambda x: x.offset, reverse=True):
+        start = entity.offset
+        end = entity.offset + entity.length
+        content = html[start:end]
+        
+        if entity.type == 'bold':
+            replacement = f"<b>{content}</b>"
+        elif entity.type == 'italic':
+            replacement = f"<i>{content}</i>"
+        elif entity.type == 'underline':
+            replacement = f"<u>{content}</u>"
+        elif entity.type == 'strikethrough':
+            replacement = f"<s>{content}</s>"
+        elif entity.type == 'code':
+            replacement = f"<code>{content}</code>"
+        elif entity.type == 'pre':
+            replacement = f"<pre>{content}</pre>"
+        elif entity.type == 'text_link':
+            replacement = f'<a href="{entity.url}">{content}</a>'
+        else:
+            continue
+        
+        html = html[:start] + replacement + html[end:]
+    return html
 
-    # Process files in batches
-    for i in range(0, len(files), BATCH_SIZE):
-        batch = service.new_batch_http_request()
-        for file in files[i : i + BATCH_SIZE]:
-            if search_str in file["name"]:
-                new_name = file["name"].replace(search_str, replace_str)
-                request = service.files().update(fileId=file["id"], body={"name": new_name})
-                batch.add(request)
-        if batch._requests:
-            process_batch_with_retry(service, batch)
-            progress_tracker.update()
-
-    # Process subfolders in parallel
-    futures = []
-    for folder in folders:
-        futures.append(
-            executor.submit(
-                rename_files_in_folder,
-                service,
-                folder["id"],
-                search_str,
-                replace_str,
-                executor,
-                progress_tracker,
-            )
+def process_content(original_html, drive_links):
+    for old_url, new_url in drive_links:
+        old_url_clean = re.escape(old_url)
+        pattern = re.compile(
+            fr'(<a\s[^>]*?href\s*=\s*["\']{old_url_clean}(?:[^"\'>]*?)["\'][^>]*>.*?</a>)|({old_url_clean}[^\s<]*)',
+            flags=re.IGNORECASE
         )
-    for future in futures:
-        future.result()
+        original_html = pattern.sub(new_url, original_html)
+    
+    # Clean residual HTML
+    original_html = re.sub(r'<([a-z]+)([^>]*)(?<!/)>$', '', original_html)
+    original_html = re.sub(r'<([a-z]+)([^>]*)></\1>', '', original_html)
+    
+    return original_html.strip()
 
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    user_id = update.message.from_user.id
+    
+    # Check for authorization code first
+    if re.match(r'^\d+/[\w-]+$', message.text.strip()):
+        await handle_authorization_code(update, context)
+        return
 
-def count_files_in_folder(service, folder_id):
-    """Recursively count files in a folder and its subfolders."""
-    items = list_folder_items(service, folder_id)
-    files = [item for item in items if item["mimeType"] != "application/vnd.google-apps.folder"]
-    folders = [item for item in items if item["mimeType"] == "application/vnd.google-apps.folder"]
+    # Handle Drive links
+    if 'drive.google.com' in message.text and '/folders/' in message.text:
+        service = get_drive_service(user_id)
+        if not service:
+            await start_authorization(update, context)
+            return
+        
+        try:
+            original_text = message.caption or message.text or ''
+            entities = message.caption_entities or message.entities or []
+            drive_links = []
+            
+            url_matches = re.finditer(r'https?://drive\.google\.com/drive/folders/[\w-]+', original_text)
+            for match in url_matches:
+                url = match.group()
+                folder_id = extract_folder_id(url)
+                
+                if folder_id:
+                    try:
+                        new_folder_id = await asyncio.get_event_loop().run_in_executor(
+                            None, copy_folder, service, folder_id
+                        )
+                        random_link = random.choice(SHORT_LINKS)
+                        new_url = f'https://drive.google.com/drive/folders/{new_folder_id} {random_link}'
+                        drive_links.append((url, new_url))
+                    except Exception as e:
+                        await message.reply_text(f"⚠️ Error processing {url}: {str(e)}")
+                        continue
 
-    # Count files in the current folder
-    file_count = len(files)
+            final_html = process_content(convert_to_html(original_text, entities), drive_links)
 
-    # Recursively count files in subfolders
-    for folder in folders:
-        file_count += count_files_in_folder(service, folder["id"])
+            send_args = {
+                'chat_id': TARGET_CHANNEL,
+                'parse_mode': 'HTML',
+                'disable_notification': True
+            }
 
-    return file_count
+            if message.photo:
+                await context.bot.send_photo(
+                    photo=message.photo[-1].file_id,
+                    caption=final_html,
+                    **send_args
+                )
+            elif message.video:
+                await context.bot.send_video(
+                    video=message.video.file_id,
+                    caption=final_html,
+                    **send_args
+                )
+            elif message.document:
+                await context.bot.send_document(
+                    document=message.document.file_id,
+                    caption=final_html,
+                    **send_args
+                )
+            elif message.audio:
+                await context.bot.send_audio(
+                    audio=message.audio.file_id,
+                    caption=final_html,
+                    **send_args
+                )
+            else:
+                await context.bot.send_message(
+                    text=final_html,
+                    **send_args
+                )
 
+        except Exception as e:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=f"⚠️ Processing error: {str(e)[:200]}"
+            )
+    else:
+        # Handle non-Drive link messages
+        await context.bot.send_message(
+            chat_id=TARGET_CHANNEL,
+            text=message.text,
+            parse_mode='HTML'
+        )
 
-def copy_folder(service, source_folder_id, parent_folder_id=None, progress_tracker=None):
-    """Recursively copy a folder and its contents to a new location."""
-    # Get the source folder's metadata
-    source_folder = service.files().get(fileId=source_folder_id, fields="name").execute()
-    folder_name = source_folder["name"]
+async def ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        if not context.args:
+            await update.message.reply_text("❌ Usage: /ban <filename_or_folder>")
+            return
 
-    # Create the new folder in the destination
-    new_folder_metadata = {
-        "name": folder_name,
-        "mimeType": "application/vnd.google-apps.folder",
-        "parents": [parent_folder_id] if parent_folder_id else [],
-    }
-    new_folder = service.files().create(body=new_folder_metadata, fields="id").execute()
-    new_folder_id = new_folder["id"]
+        item_name = ' '.join(context.args).strip()
+        if not item_name:
+            await update.message.reply_text("❌ Empty name provided")
+            return
 
-    # List all items in the source folder
-    items = list_folder_items(service, source_folder_id)
-
-    # Copy files and subfolders
-    for item in items:
-        if item["mimeType"] == "application/vnd.google-apps.folder":
-            # Recursively copy subfolders
-            copy_folder(service, item["id"], new_folder_id, progress_tracker)
+        if '.' in item_name.split('/')[-1]:
+            if item_name not in banned_items['files']:
+                banned_items['files'].append(item_name)
+                response_text = f"✅ Banned file: {item_name}"
+            else:
+                response_text = f"⚠️ File already banned: {item_name}"
         else:
-            # Copy files
-            file_metadata = {"name": item["name"], "parents": [new_folder_id]}
-            service.files().copy(fileId=item["id"], body=file_metadata).execute()
-            if progress_tracker:
-                progress_tracker.update()
+            if item_name not in banned_items['folders']:
+                banned_items['folders'].append(item_name)
+                response_text = f"✅ Banned folder: {item_name}"
+            else:
+                response_text = f"⚠️ Folder already banned: {item_name}"
+        
+        save_banned_items()
+        await update.message.reply_text(response_text)
 
-    return new_folder_id
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Ban failed: {str(e)}")
 
-
-def copy_contents(service, source_folder_id, destination_folder_id, progress_tracker):
-    """Copy contents of a folder (excluding the folder itself) to a destination folder."""
-    items = list_folder_items(service, source_folder_id)
-
-    for item in items:
-        if item["mimeType"] == "application/vnd.google-apps.folder":
-            # Recursively copy subfolders
-            copy_folder(service, item["id"], destination_folder_id, progress_tracker)
-        else:
-            # Copy files
-            file_metadata = {"name": item["name"], "parents": [destination_folder_id]}
-            service.files().copy(fileId=item["id"], body=file_metadata).execute()
-            if progress_tracker:
-                progress_tracker.update()
-
-
-def copy_contents_to_subfolders(service, source_folder_id, destination_folder_id, progress_tracker):
-    """Copy contents of a folder (excluding the folder itself) to another folder and its subfolders."""
-    # List all items in the source folder
-    source_items = list_folder_items(service, source_folder_id)
-
-    # List all subfolders in the destination folder
-    destination_items = list_folder_items(service, destination_folder_id)
-    destination_subfolders = [
-        item for item in destination_items if item["mimeType"] == "application/vnd.google-apps.folder"
-    ]
-
-    # Copy files to the destination folder
-    for item in source_items:
-        if item["mimeType"] != "application/vnd.google-apps.folder":
-            file_metadata = {"name": item["name"], "parents": [destination_folder_id]}
-            service.files().copy(fileId=item["id"], body=file_metadata).execute()
-            if progress_tracker:
-                progress_tracker.update()
-
-    # Recursively copy files to subfolders
-    for subfolder in destination_subfolders:
-        copy_contents_to_subfolders(service, source_folder_id, subfolder["id"], progress_tracker)
-
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    error = context.error
+    logger.error(f"Error: {str(error)}")
+    if update.effective_message:
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="⚠️ An error occurred. Please check the format and try again."
+        )
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Start command handler."""
     await update.message.reply_text(
-        "Welcome! Use /configuration to authenticate Google Drive.\n"
-        "Available commands:\n"
-        "/copy_folder - Copy a Google Drive folder\n"
-        "/rename_files - Rename files in a folder\n"
-        "/count_files - Count files in a folder\n"
-        "/copy_and_rename - Copy and rename files from two source folders\n"
-        "/copy_contents - Copy contents to another folder\n"
+        "🚀 TechZoneX Auto Forward Bot\n\n"
+        "Send any post with Google Drive links for processing!\n"
+        "Admins: Use /ban <name> to block files/folders"
     )
-
-
-async def configuration(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Start the authentication process."""
-    flow, auth_url = authenticate_google_drive()
-    if auth_url:
-        context.user_data["flow"] = flow
-        await update.message.reply_text(f"Please visit this URL to authorize the application: {auth_url}")
-        await update.message.reply_text("After authorization, paste the code you received here.")
-        return AUTH_CODE
-    else:
-        await update.message.reply_text("Already authenticated.")
-        return ConversationHandler.END
-
-
-async def auth_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle the authorization code."""
-    user_code = update.message.text
-    flow = context.user_data.get("flow")
-    if flow:
-        try:
-            flow.fetch_token(code=user_code)
-            creds = flow.credentials
-            with open("token.json", "w") as token:
-                token.write(creds.to_json())
-            await update.message.reply_text("Authorization successful!")
-        except Exception as e:
-            await update.message.reply_text(f"Failed to authenticate: {e}")
-    return ConversationHandler.END
-
-
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Cancel the current operation."""
-    await update.message.reply_text("Operation cancelled.")
-    return ConversationHandler.END
-
-
-async def copy_folder_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle the copy folder command."""
-    await update.message.reply_text("Enter the source folder URL:")
-    return FOLDER_URL
-
-
-async def handle_folder_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle the folder URL input."""
-    folder_url = update.message.text
-    context.user_data["folder_url"] = folder_url
-    await update.message.reply_text("Enter the destination folder URL (leave blank for root):")
-    return DESTINATION_URL
-
-
-async def handle_destination_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle the destination folder URL input."""
-    destination_url = update.message.text
-    folder_url = context.user_data.get("folder_url")
-    source_folder_id = extract_folder_id_from_url(folder_url)
-    destination_folder_id = extract_folder_id_from_url(destination_url) if destination_url else None
-
-    # Authenticate Google Drive
-    creds, _ = authenticate_google_drive()
-    service = build("drive", "v3", credentials=creds)
-
-    # Count total items to copy
-    total_items = count_files_in_folder(service, source_folder_id)
-    progress_tracker = ProgressTracker(total_items)
-
-    await update.message.reply_text(f"Copying {total_items} items...")
-    new_folder_id = copy_folder(service, source_folder_id, destination_folder_id, progress_tracker)
-    await update.message.reply_text(f"\nFolder copied successfully! New folder ID: {new_folder_id}")
-    return ConversationHandler.END
-
-
-async def rename_files_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle the rename files command."""
-    await update.message.reply_text("Enter the folder URL:")
-    return FOLDER_URL
-
-
-async def handle_rename_folder_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle the folder URL input for renaming."""
-    folder_url = update.message.text
-    context.user_data["folder_url"] = folder_url
-    await update.message.reply_text("Enter the search string:")
-    return SEARCH_STR
-
-
-async def handle_search_str(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle the search string input."""
-    search_str = update.message.text
-    context.user_data["search_str"] = search_str
-    await update.message.reply_text("Enter the replace string:")
-    return REPLACE_STR
-
-
-async def handle_replace_str(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle the replace string input."""
-    replace_str = update.message.text
-    folder_url = context.user_data.get("folder_url")
-    search_str = context.user_data.get("search_str")
-
-    # Authenticate Google Drive
-    creds, _ = authenticate_google_drive()
-    service = build("drive", "v3", credentials=creds)
-
-    folder_id = extract_folder_id_from_url(folder_url)
-
-    # Count total items to rename
-    total_items = count_files_in_folder(service, folder_id)
-    progress_tracker = ProgressTracker(total_items)
-
-    await update.message.reply_text(f"Renaming {total_items} items...")
-    with ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
-        rename_files_in_folder(service, folder_id, search_str, replace_str, executor, progress_tracker)
-    await update.message.reply_text("\nRenaming completed at high speed!")
-    return ConversationHandler.END
-
-
-async def count_files_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle the count files command."""
-    await update.message.reply_text("Enter the folder URL:")
-    return FOLDER_URL
-
-
-async def handle_count_folder_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle the folder URL input for counting files."""
-    folder_url = update.message.text
-    folder_id = extract_folder_id_from_url(folder_url)
-
-    # Authenticate Google Drive
-    creds, _ = authenticate_google_drive()
-    service = build("drive", "v3", credentials=creds)
-
-    total_files = count_files_in_folder(service, folder_id)
-    await update.message.reply_text(f"Total files in folder and subfolders: {total_files}")
-    return ConversationHandler.END
-
-
-async def copy_and_rename_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle the copy and rename command."""
-    await update.message.reply_text("Enter the first source folder URL:")
-    return SOURCE_URL
-
-
-async def handle_first_source_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle the first source folder URL input."""
-    source_url = update.message.text
-    context.user_data["first_source_url"] = source_url
-
-    # Authenticate Google Drive
-    creds, _ = authenticate_google_drive()
-    service = build("drive", "v3", credentials=creds)
-
-    first_source_id = extract_folder_id_from_url(source_url)
-    second_source_id = SECOND_SOURCE_FOLDER_ID
-
-    # Count total items to copy
-    total_items = count_files_in_folder(service, first_source_id) + count_files_in_folder(service, second_source_id)
-    progress_tracker = ProgressTracker(total_items)
-
-    await update.message.reply_text("Copying first source folder to 'Unposted'...")
-    new_folder_id = copy_folder(service, first_source_id, UNPOSTED_FOLDER_ID, progress_tracker)
-
-    await update.message.reply_text("Copying contents of second source folder to the newly copied folder...")
-    copy_contents(service, second_source_id, new_folder_id, progress_tracker)
-
-    await update.message.reply_text("Renaming .mp4 files...")
-    with ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
-        rename_files_in_folder(service, new_folder_id, ".mp4", " Telegram@TechZoneX.mp4", executor, progress_tracker)
-
-    await update.message.reply_text("\nCopy and rename completed successfully!")
-    return ConversationHandler.END
-
-
-async def copy_contents_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle the copy contents command."""
-    await update.message.reply_text("Enter the source folder URL:")
-    return SOURCE_URL
-
-
-async def handle_copy_contents_source_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle the source folder URL input for copying contents."""
-    source_url = update.message.text
-    context.user_data["source_url"] = source_url
-    await update.message.reply_text("Enter the destination folder URL:")
-    return DESTINATION_URL
-
-
-async def handle_copy_contents_destination_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle the destination folder URL input for copying contents."""
-    destination_url = update.message.text
-    source_url = context.user_data.get("source_url")
-    source_folder_id = extract_folder_id_from_url(source_url)
-    destination_folder_id = extract_folder_id_from_url(destination_url)
-
-    # Authenticate Google Drive
-    creds, _ = authenticate_google_drive()
-    service = build("drive", "v3", credentials=creds)
-
-    # Count total items to copy
-    total_items = count_files_in_folder(service, source_folder_id)
-    progress_tracker = ProgressTracker(total_items)
-
-    await update.message.reply_text(f"Copying {total_items} items...")
-    copy_contents_to_subfolders(service, source_folder_id, destination_folder_id, progress_tracker)
-    await update.message.reply_text("\nContents copied successfully!")
-    return ConversationHandler.END
-
 
 def main():
-    """Start the bot."""
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-
-    # Conversation handler for authentication
-    auth_conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("configuration", configuration)],
-        states={
-            AUTH_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, auth_code)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-    )
-
-    # Conversation handler for copying folders
-    copy_folder_conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("copy_folder", copy_folder_command)],
-        states={
-            FOLDER_URL: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_folder_url)],
-            DESTINATION_URL: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_destination_url)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-    )
-
-    # Conversation handler for renaming files
-    rename_files_conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("rename_files", rename_files_command)],
-        states={
-            FOLDER_URL: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_rename_folder_url)],
-            SEARCH_STR: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_search_str)],
-            REPLACE_STR: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_replace_str)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-    )
-
-    # Conversation handler for counting files
-    count_files_conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("count_files", count_files_command)],
-        states={
-            FOLDER_URL: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_count_folder_url)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-    )
-
-    # Conversation handler for copy and rename
-    copy_and_rename_conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("copy_and_rename", copy_and_rename_command)],
-        states={
-            SOURCE_URL: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_first_source_url)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-    )
-
-    # Conversation handler for copying contents
-    copy_contents_conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("copy_contents", copy_contents_command)],
-        states={
-            SOURCE_URL: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_copy_contents_source_url)],
-            DESTINATION_URL: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_copy_contents_destination_url)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-    )
-
-    # Add all handlers to the application
+    application = Application.builder().token(BOT_TOKEN).build()
+    
+    # Command handlers
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(auth_conv_handler)
-    application.add_handler(copy_folder_conv_handler)
-    application.add_handler(rename_files_conv_handler)
-    application.add_handler(count_files_conv_handler)
-    application.add_handler(copy_and_rename_conv_handler)
-    application.add_handler(copy_contents_conv_handler)
-
-    # Start the bot
+    application.add_handler(CommandHandler("ban", ban))
+    
+    # Message handler
+    application.add_handler(MessageHandler(
+        filters.CAPTION | filters.TEXT | filters.PHOTO |
+        filters.VIDEO | filters.Document.ALL | filters.AUDIO &
+        ~filters.COMMAND,
+        handle_message
+    ))
+    
+    application.add_error_handler(error_handler)
     application.run_polling()
 
-
 if __name__ == "__main__":
+    if not os.path.exists(BANNED_ITEMS_FILE):
+        save_banned_items()
     main()
