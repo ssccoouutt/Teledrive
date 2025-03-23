@@ -18,32 +18,25 @@ PHASE2_SOURCE = '1TaBiq6z01lLP-znWMz1S_RwJ1PkLRyjk'
 PHASE3_SOURCE = '12V7EnRIYcSgEtt0PR5fhV8cO22nzYuiv'
 SHORT_LINKS = ["rb.gy/cd8ugy", "bit.ly/3UcvhlA", "t.ly/CfcVB", "cutt.ly/Kee3oiLO"]
 TARGET_CHANNEL = "@techworld196"
-BANNED_ITEMS_FILE = 'banned_items.json'
+BANNED_FILE_ID = '1B5GAAtzpuH_XNGyUiJIMDlB9hJfxkg8r'
 
 # Initialize banned items
-def initialize_banned_items():
-    default = {
-        'files': ['100$ Free.docx', 'Free Courses.pdf'],
-        'folders': ['00- Join LearnWithFaizan']
-    }
-    
+def initialize_banned_items(service):
     try:
-        if os.path.exists(BANNED_ITEMS_FILE):
-            with open(BANNED_ITEMS_FILE, 'r') as f:
-                data = json.load(f)
-                if 'files' in data and 'folders' in data:
-                    return data
-        with open(BANNED_ITEMS_FILE, 'w') as f:
-            json.dump(default, f)
-        return default
-    except Exception:
-        return default
+        banned_file = service.files().get_media(fileId=BANNED_FILE_ID).execute()
+        banned_items = banned_file.decode('utf-8').splitlines()
+        return banned_items
+    except Exception as e:
+        print(f"Error initializing banned items: {str(e)}")
+        return []
 
-banned_items = initialize_banned_items()
-
-def save_banned_items():
-    with open(BANNED_ITEMS_FILE, 'w') as f:
-        json.dump(banned_items, f, indent=2)
+def save_banned_items(service, banned_items):
+    try:
+        banned_file_content = '\n'.join(banned_items).encode('utf-8')
+        media_body = MediaIoBaseUpload(io.BytesIO(banned_file_content), mimetype='text/plain')
+        service.files().update(fileId=BANNED_FILE_ID, media_body=media_body).execute()
+    except Exception as e:
+        print(f"Error saving banned items: {str(e)}")
 
 def get_drive_service():
     creds = None
@@ -62,10 +55,10 @@ def extract_folder_id(url):
     match = re.search(r'/folders/([a-zA-Z0-9-_]+)', url)
     return match.group(1) if match else None
 
-def should_skip_item(name):
-    return name in banned_items['files'] or name in banned_items['folders']
+def should_skip_item(name, banned_items):
+    return name in banned_items
 
-def copy_folder(service, folder_id):
+def copy_folder(service, folder_id, banned_items):
     try:
         folder = service.files().get(fileId=folder_id, fields='name').execute()
         new_folder = service.files().create(body={
@@ -74,12 +67,12 @@ def copy_folder(service, folder_id):
         }).execute()
         new_folder_id = new_folder['id']
 
-        copy_folder_contents(service, folder_id, new_folder_id)
+        copy_folder_contents(service, folder_id, new_folder_id, banned_items)
         subfolders = get_all_subfolders_recursive(service, new_folder_id)
         for subfolder_id in subfolders:
-            copy_files_only(service, PHASE2_SOURCE, subfolder_id, overwrite=True)
+            copy_files_only(service, PHASE2_SOURCE, subfolder_id, banned_items, overwrite=True)
 
-        copy_bonus_content(service, PHASE3_SOURCE, new_folder_id, overwrite=True)
+        copy_bonus_content(service, PHASE3_SOURCE, new_folder_id, banned_items, overwrite=True)
         rename_video_files(service, new_folder_id)
         for subfolder_id in subfolders:
             rename_video_files(service, subfolder_id)
@@ -114,7 +107,7 @@ def get_all_subfolders_recursive(service, folder_id):
     
     return subfolders
 
-def copy_files_only(service, source_id, dest_id, overwrite=False):
+def copy_files_only(service, source_id, dest_id, banned_items, overwrite=False):
     page_token = None
     while True:
         response = service.files().list(
@@ -124,16 +117,16 @@ def copy_files_only(service, source_id, dest_id, overwrite=False):
         ).execute()
         
         for item in response.get('files', []):
-            if should_skip_item(item['name']):
+            if should_skip_item(item['name'], banned_items):
                 continue
             if item['mimeType'] != 'application/vnd.google-apps.folder':
-                copy_item_to_folder(service, item, dest_id, overwrite)
+                copy_item_to_folder(service, item, dest_id, banned_items, overwrite)
         
         page_token = response.get('nextPageToken')
         if not page_token:
             break
 
-def copy_bonus_content(service, source_id, dest_id, overwrite=False):
+def copy_bonus_content(service, source_id, dest_id, banned_items, overwrite=False):
     page_token = None
     while True:
         response = service.files().list(
@@ -143,15 +136,15 @@ def copy_bonus_content(service, source_id, dest_id, overwrite=False):
         ).execute()
         
         for item in response.get('files', []):
-            if should_skip_item(item['name']):
+            if should_skip_item(item['name'], banned_items):
                 continue
-            copy_item_to_folder(service, item, dest_id, overwrite)
+            copy_item_to_folder(service, item, dest_id, banned_items, overwrite)
         
         page_token = response.get('nextPageToken')
         if not page_token:
             break
 
-def copy_item_to_folder(service, item, dest_folder_id, overwrite=False):
+def copy_item_to_folder(service, item, dest_folder_id, banned_items, overwrite=False):
     try:
         if overwrite:
             existing = service.files().list(
@@ -168,7 +161,7 @@ def copy_item_to_folder(service, item, dest_folder_id, overwrite=False):
                 'parents': [dest_folder_id],
                 'mimeType': 'application/vnd.google-apps.folder'
             }).execute()
-            copy_bonus_content(service, item['id'], new_folder['id'], overwrite)
+            copy_bonus_content(service, item['id'], new_folder['id'], banned_items, overwrite)
         else:
             service.files().copy(
                 fileId=item['id'],
@@ -177,7 +170,7 @@ def copy_item_to_folder(service, item, dest_folder_id, overwrite=False):
     except Exception as e:
         print(f"Error copying {item['name']}: {str(e)}")
 
-def copy_folder_contents(service, source_id, dest_id):
+def copy_folder_contents(service, source_id, dest_id, banned_items):
     page_token = None
     while True:
         response = service.files().list(
@@ -187,7 +180,7 @@ def copy_folder_contents(service, source_id, dest_id):
         ).execute()
         
         for item in response.get('files', []):
-            if should_skip_item(item['name']):
+            if should_skip_item(item['name'], banned_items):
                 continue
                 
             if item['mimeType'] == 'application/vnd.google-apps.folder':
@@ -196,7 +189,7 @@ def copy_folder_contents(service, source_id, dest_id):
                     'parents': [dest_id],
                     'mimeType': 'application/vnd.google-apps.folder'
                 }).execute()
-                copy_folder_contents(service, item['id'], new_subfolder['id'])
+                copy_folder_contents(service, item['id'], new_subfolder['id'], banned_items)
             else:
                 service.files().copy(
                     fileId=item['id'],
@@ -334,8 +327,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     try:
                         if not drive_service:
                             drive_service = get_drive_service()
+                        banned_items = initialize_banned_items(drive_service)
                         new_folder_id = await asyncio.get_event_loop().run_in_executor(
-                                None, copy_folder, drive_service, folder_id
+                                None, copy_folder, drive_service, folder_id, banned_items
                             )
                         random_link = random.choice(SHORT_LINKS)
                         new_url = f'https://drive.google.com/drive/folders/{new_folder_id} {random_link}'
@@ -399,24 +393,46 @@ async def ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Empty name provided")
             return
 
-        if '.' in item_name.split('/')[-1]:
-            if item_name not in banned_items['files']:
-                banned_items['files'].append(item_name)
-                response_text = f"✅ Banned file: {item_name}"
-            else:
-                response_text = f"⚠️ File already banned: {item_name}"
+        drive_service = get_drive_service()
+        banned_items = initialize_banned_items(drive_service)
+
+        if item_name not in banned_items:
+            banned_items.append(item_name)
+            save_banned_items(drive_service, banned_items)
+            response_text = f"✅ Banned: {item_name}"
         else:
-            if item_name not in banned_items['folders']:
-                banned_items['folders'].append(item_name)
-                response_text = f"✅ Banned folder: {item_name}"
-            else:
-                response_text = f"⚠️ Folder already banned: {item_name}"
+            response_text = f"⚠️ Already banned: {item_name}"
         
-        save_banned_items()
         await update.message.reply_text(response_text)
 
     except Exception as e:
         await update.message.reply_text(f"⚠️ Ban failed: {str(e)}")
+
+async def unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        if not context.args:
+            await update.message.reply_text("❌ Usage: /unban <filename_or_folder>")
+            return
+
+        item_name = ' '.join(context.args).strip()
+        if not item_name:
+            await update.message.reply_text("❌ Empty name provided")
+            return
+
+        drive_service = get_drive_service()
+        banned_items = initialize_banned_items(drive_service)
+
+        if item_name in banned_items:
+            banned_items.remove(item_name)
+            save_banned_items(drive_service, banned_items)
+            response_text = f"✅ Unbanned: {item_name}"
+        else:
+            response_text = f"⚠️ Not banned: {item_name}"
+        
+        await update.message.reply_text(response_text)
+
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Unban failed: {str(e)}")
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     error = context.error
@@ -437,7 +453,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🚀 TechZoneX Auto Forward Bot\n\n"
         "Send any post with Google Drive links for processing!\n"
-        "Admins: Use /ban <name> to block files/folders"
+        "Admins: Use /ban <name> to block files/folders\n"
+        "Use /unban <name> to unblock files/folders"
     )
 
 def main():
@@ -445,6 +462,7 @@ def main():
     
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("ban", ban))
+    application.add_handler(CommandHandler("unban", unban))
     
     application.add_handler(MessageHandler(
         filters.CAPTION | filters.TEXT | filters.PHOTO |
@@ -457,6 +475,4 @@ def main():
     application.run_polling()
 
 if __name__ == "__main__":
-    if not os.path.exists(BANNED_ITEMS_FILE):
-        save_banned_items()
     main()
