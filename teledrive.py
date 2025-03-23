@@ -348,27 +348,41 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         }
 
         if message.photo:
-            await context.bot.send_photo(
-                photo=message.photo[-1].file_id,
-                caption=final_html,
-                **send_args
-            )
+            # Try sending the photo with the caption
+            try:
+                await context.bot.send_photo(
+                    photo=message.photo[-1].file_id,
+                    caption=final_html[:1024],  # Truncate caption to 1024 characters
+                    **send_args
+                )
+            except Exception as e:
+                print(f"Error sending photo with caption: {str(e)}")
+                # If sending with caption fails, send the photo and caption separately
+                await context.bot.send_photo(
+                    photo=message.photo[-1].file_id,
+                    **send_args
+                )
+                await context.bot.send_message(
+                    chat_id=TARGET_CHANNEL,
+                    text=final_html,
+                    **send_args
+                )
         elif message.video:
             await context.bot.send_video(
                 video=message.video.file_id,
-                caption=final_html,
+                caption=final_html[:1024],  # Truncate caption to 1024 characters
                 **send_args
             )
         elif message.document:
             await context.bot.send_document(
                 document=message.document.file_id,
-                caption=final_html,
+                caption=final_html[:1024],  # Truncate caption to 1024 characters
                 **send_args
             )
         elif message.audio:
             await context.bot.send_audio(
                 audio=message.audio.file_id,
-                caption=final_html,
+                caption=final_html[:1024],  # Truncate caption to 1024 characters
                 **send_args
             )
         else:
