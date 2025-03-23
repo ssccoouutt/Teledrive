@@ -1,11 +1,11 @@
 import re
 import os
-import json
 import random
 import asyncio
 import traceback
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseUpload
 from google.auth.transport.requests import Request
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -20,7 +20,7 @@ SHORT_LINKS = ["rb.gy/cd8ugy", "bit.ly/3UcvhlA", "t.ly/CfcVB", "cutt.ly/Kee3oiLO
 TARGET_CHANNEL = "@techworld196"
 BANNED_FILE_ID = '1B5GAAtzpuH_XNGyUiJIMDlB9hJfxkg8r'
 
-# Initialize banned items
+# Initialize banned items from Google Drive
 def initialize_banned_items(service):
     try:
         banned_file = service.files().get_media(fileId=BANNED_FILE_ID).execute()
