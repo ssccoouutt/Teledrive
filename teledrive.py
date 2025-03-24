@@ -212,7 +212,7 @@ def rename_video_files(service, folder_id):
         
         for item in response.get('files', []):
             if item['name'].endswith('.mp4'):
-                new_name = item['name'].replace('.mp4', ' (Telegram@TechZoneX.mp4)')
+                new_name = item['name'].replace('.mp4', ' (Telegram@TechZoneX).mp4')
                 service.files().update(
                     fileId=item['id'],
                     body={'name': new_name}
