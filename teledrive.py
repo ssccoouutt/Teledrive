@@ -10,6 +10,7 @@ from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
 from google.auth.transport.requests import Request
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.constants import ParseMode
 
 # Configuration
 BOT_TOKEN = "7846379611:AAGzu4KM-Aq699Q8aHNt29t0YbTnDKbkXbI"
@@ -255,28 +256,80 @@ def rename_video_files(service, folder_id):
         if not page_token:
             break
 
-def process_content(original_text, drive_links, replace_rules):
+def convert_to_html(text, entities):
+    """
+    Convert message text with Telegram entities to HTML while preserving only Telegram formatting
+    and ignoring font styles.
+    """
+    html = text
+    # Process entities in reverse order to avoid offset issues
+    for entity in sorted(
+        [e for e in entities if (e.offset + e.length) <= len(text)],
+        key=lambda x: x.offset,
+        reverse=True
+    ):
+        start = entity.offset
+        end = entity.offset + entity.length
+        content = html[start:end]
+        
+        if entity.type == 'bold':
+            replacement = f"<b>{content}</b>"
+        elif entity.type == 'italic':
+            replacement = f"<i>{content}</i>"
+        elif entity.type == 'underline':
+            replacement = f"<u>{content}</u>"
+        elif entity.type == 'strikethrough':
+            replacement = f"<s>{content}</s>"
+        elif entity.type == 'code':
+            replacement = f"<code>{content}</code>"
+        elif entity.type == 'pre':
+            replacement = f"<pre>{content}</pre>"
+        elif entity.type == 'text_link':
+            replacement = f'<a href="{entity.url}">{content}</a>'
+        elif entity.type == 'text_mention':
+            replacement = f'<a href="tg://user?id={entity.user.id}">{content}</a>'
+        elif entity.type == 'blockquote':
+            replacement = f"<blockquote>{content}</blockquote>"
+        else:
+            # Skip other entity types (like custom emoji, font changes, etc.)
+            continue
+        
+        html = html[:start] + replacement + html[end:]
+    
+    return html
+
+def process_content(original_text, entities, drive_links, replace_rules):
+    """
+    Process content while preserving Telegram formatting and applying replacements
+    """
+    # Convert to HTML first to preserve Telegram formatting
+    html = convert_to_html(original_text, entities)
+    
     # Apply replacement rules
     for old_text, new_text in replace_rules:
-        original_text = original_text.replace(old_text, new_text)
+        # Replace in HTML while preserving tags
+        pattern = re.compile(re.escape(old_text), re.IGNORECASE)
+        html = pattern.sub(new_text, html)
     
     # Replace drive links
     for old_url, new_url in drive_links:
-        original_text = original_text.replace(old_url, new_url)
+        # Replace in HTML while preserving tags
+        pattern = re.compile(re.escape(old_url), re.IGNORECASE)
+        html = pattern.sub(new_url, html)
     
     # Clear everything after the last drive link + short URL
     if drive_links:
         # Find the position of the last replacement
         last_pos = 0
         for old_url, new_url in drive_links:
-            pos = original_text.rfind(new_url)
+            pos = html.rfind(new_url)
             if pos != -1 and pos > last_pos:
                 last_pos = pos + len(new_url)
         
         # Keep only up to the last replacement
-        original_text = original_text[:last_pos]
+        html = html[:last_pos]
     
-    return original_text.strip()
+    return html.strip()
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
@@ -284,6 +337,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     original_text = message.caption or message.text or ''
+    entities = message.caption_entities or message.entities or []
     drive_links = []
 
     try:
@@ -313,42 +367,87 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         await message.reply_text(f"⚠️ Error processing {url}: {str(e)}")
                         continue
 
-            final_text = process_content(original_text, drive_links, replace_rules)
+            final_text = process_content(original_text, entities, drive_links, replace_rules)
 
         send_args = {
             'chat_id': TARGET_CHANNEL,
+            'parse_mode': ParseMode.HTML,
             'disable_notification': True
         }
 
         if message.photo:
             await context.bot.send_photo(
                 photo=message.photo[-1].file_id,
-                caption=final_text,
+                caption=final_text if final_text else None,
                 **send_args
             )
         elif message.video:
             await context.bot.send_video(
                 video=message.video.file_id,
-                caption=final_text,
+                caption=final_text if final_text else None,
                 **send_args
             )
         elif message.document:
             await context.bot.send_document(
                 document=message.document.file_id,
-                caption=final_text,
+                caption=final_text if final_text else None,
                 **send_args
             )
         elif message.audio:
             await context.bot.send_audio(
                 audio=message.audio.file_id,
-                caption=final_text,
+                caption=final_text if final_text else None,
                 **send_args
+            )
+        elif message.animation:
+            await context.bot.send_animation(
+                animation=message.animation.file_id,
+                caption=final_text if final_text else None,
+                **send_args
+            )
+        elif message.sticker:
+            await context.bot.send_sticker(
+                sticker=message.sticker.file_id,
+                **{k:v for k,v in send_args.items() if k != 'parse_mode'}
+            )
+        elif message.voice:
+            await context.bot.send_voice(
+                voice=message.voice.file_id,
+                caption=final_text if final_text else None,
+                **send_args
+            )
+        elif message.video_note:
+            await context.bot.send_video_note(
+                video_note=message.video_note.file_id,
+                **{k:v for k,v in send_args.items() if k != 'parse_mode'}
+            )
+        elif message.contact:
+            await context.bot.send_contact(
+                contact=message.contact,
+                **{k:v for k,v in send_args.items() if k != 'parse_mode'}
+            )
+        elif message.location:
+            await context.bot.send_location(
+                location=message.location,
+                **{k:v for k,v in send_args.items() if k != 'parse_mode'}
+            )
+        elif message.venue:
+            await context.bot.send_venue(
+                venue=message.venue,
+                **{k:v for k,v in send_args.items() if k != 'parse_mode'}
+            )
+        elif message.poll:
+            await context.bot.send_poll(
+                question=message.poll.question,
+                options=[option.text for option in message.poll.options],
+                **{k:v for k,v in send_args.items() if k != 'parse_mode'}
             )
         else:
-            await context.bot.send_message(
-                text=final_text,
-                **send_args
-            )
+            if final_text:
+                await context.bot.send_message(
+                    text=final_text,
+                    **send_args
+                )
 
     except Exception as e:
         await context.bot.send_message(
@@ -452,12 +551,19 @@ async def unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def replace(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        if len(context.args) < 2:
-            await update.message.reply_text("❌ Usage: /replace <old_text> <new_text>")
+        if not context.args:
+            await update.message.reply_text("❌ Usage: /replace [old text] to [new text]")
             return
 
-        old_text = ' '.join(context.args[:-1]).strip()
-        new_text = context.args[-1].strip()
+        # Join all arguments and split on " to " (with spaces)
+        full_text = ' '.join(context.args)
+        if ' to ' not in full_text:
+            await update.message.reply_text("❌ Usage: /replace [old text] to [new text]")
+            return
+
+        old_text, new_text = full_text.split(' to ', 1)
+        old_text = old_text.strip()
+        new_text = new_text.strip()
 
         if not old_text or not new_text:
             await update.message.reply_text("❌ Both old and new text must be provided")
@@ -506,7 +612,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Admins:\n"
         "/ban <name_or_link> - Block files/folders\n"
         "/unban <name_or_link> - Unblock files/folders\n"
-        "/replace <old> <new> - Replace text in posts"
+        "/replace [old text] to [new text] - Replace text in posts"
     )
 
 def main():
@@ -519,8 +625,10 @@ def main():
     
     application.add_handler(MessageHandler(
         filters.CAPTION | filters.TEXT | filters.PHOTO |
-        filters.VIDEO | filters.Document.ALL | filters.AUDIO &
-        ~filters.COMMAND,
+        filters.VIDEO | filters.Document.ALL | filters.AUDIO |
+        filters.ANIMATION | filters.STICKER | filters.VOICE |
+        filters.VIDEO_NOTE | filters.CONTACT | filters.LOCATION |
+        filters.VENUE | filters.POLL & ~filters.COMMAND,
         handle_message
     ))
     
