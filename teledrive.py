@@ -623,14 +623,16 @@ def main():
     application.add_handler(CommandHandler("unban", unban))
     application.add_handler(CommandHandler("replace", replace))
     
-    application.add_handler(MessageHandler(
+    # Corrected message handler with proper filters
+    message_filter = (
         filters.CAPTION | filters.TEXT | filters.PHOTO |
         filters.VIDEO | filters.Document.ALL | filters.AUDIO |
-        filters.ANIMATION | filters.STICKER | filters.VOICE |
+        filters.ANIMATION | filters.Sticker.ALL | filters.VOICE |
         filters.VIDEO_NOTE | filters.CONTACT | filters.LOCATION |
-        filters.VENUE | filters.POLL & ~filters.COMMAND,
-        handle_message
-    ))
+        filters.VENUE | filters.POLL
+    ) & ~filters.COMMAND
+    
+    application.add_handler(MessageHandler(message_filter, handle_message))
     
     application.add_error_handler(error_handler)
     application.run_polling()
