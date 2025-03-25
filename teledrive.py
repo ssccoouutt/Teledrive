@@ -63,7 +63,7 @@ def initialize_replace_rules(service):
 def save_replace_rules(service, replace_rules):
     try:
         content = '\n'.join([f"{old}|{new}" for old, new in replace_rules])
-        media_body = MediaIoBaseUpload(io.BytesIO(content.encode('utf-8'), mimetype='text/plain')
+        media_body = MediaIoBaseUpload(io.BytesIO(content.encode('utf-8')), mimetype='text/plain')
         service.files().update(fileId=REPLACE_FILE_ID, media_body=media_body).execute()
     except Exception as e:
         print(f"Error saving replace rules: {str(e)}")
