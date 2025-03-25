@@ -56,6 +56,10 @@ def extract_folder_id(url):
     match = re.search(r'/folders/([a-zA-Z0-9-_]+)', url)
     return match.group(1) if match else None
 
+def extract_file_id(url):
+    match = re.search(r'/file/d/([a-zA-Z0-9-_]+)', url)
+    return match.group(1) if match else None
+
 def should_skip_item(name, banned_items):
     return name in banned_items
 
@@ -222,84 +226,11 @@ def rename_video_files(service, folder_id):
         if not page_token:
             break
 
-def sanitize_html(html):
-    """Ensure all HTML tags are properly closed"""
-    stack = []
-    tags = re.finditer(r'<(/?)([a-zA-Z]+)([^>]*)>', html)
-    
-    for match in tags:
-        is_closing, tag_name = match.group(1), match.group(2).lower()
-        if not is_closing:
-            stack.append(tag_name)
-        else:
-            while stack and stack[-1] != tag_name:
-                stack.pop()
-            if stack and stack[-1] == tag_name:
-                stack.pop()
-
-    sanitized = html
-    for tag in reversed(stack):
-        sanitized += f'</{tag}>'
-    
-    return sanitized
-
-def convert_to_html(text, entities):
-    html = text
-    valid_entities = sorted(
-        [e for e in entities if (e.offset + e.length) <= len(text)],
-        key=lambda x: x.offset,
-        reverse=True
-    )
-    
-    for entity in valid_entities:
-        start = entity.offset
-        end = entity.offset + entity.length
-        content = html[start:end]
-        
-        if entity.type == 'bold':
-            replacement = f"<b>{content}</b>"
-        elif entity.type == 'italic':
-            replacement = f"<i>{content}</i>"
-        elif entity.type == 'underline':
-            replacement = f"<u>{content}</u>"
-        elif entity.type == 'strikethrough':
-            replacement = f"<s>{content}</s>"
-        elif entity.type == 'code':
-            replacement = f"<code>{content}</code>"
-        elif entity.type == 'pre':
-            replacement = f"<pre>{content}</pre>"
-        elif entity.type == 'text_link':
-            replacement = f'<a href="{entity.url}">{content}</a>'
-        else:
-            continue
-        
-        html = html[:start] + replacement + html[end:]
-    return html
-
-def process_content(original_html, drive_links):
-    replacements = []
+def process_content(original_text, drive_links):
     for old_url, new_url in drive_links:
-        old_url_clean = re.escape(old_url)
-        pattern = re.compile(
-            fr'(<a\s[^>]*?href\s*=\s*["\']{old_url_clean}(?:[^"\'>]*?)["\'][^>]*>.*?</a>)|({old_url_clean}[^\s<]*)',
-            flags=re.IGNORECASE
-        )
-        original_html = pattern.sub(new_url, original_html)
-        replacements.append(new_url)
+        original_text = original_text.replace(old_url, new_url)
     
-    last_pos = 0
-    for replacement in replacements:
-        pos = original_html.rfind(replacement)
-        if pos != -1 and pos > last_pos:
-            last_pos = pos + len(replacement)
-    
-    if replacements:
-        original_html = original_html[:last_pos]
-    
-    original_html = re.sub(r'<([a-z]+)([^>]*)(?<!/)>$', '', original_html)
-    original_html = re.sub(r'<([a-z]+)([^>]*)></\1>', '', original_html)
-    
-    return sanitize_html(original_html.strip())
+    return original_text.strip()
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
@@ -307,14 +238,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     original_text = message.caption or message.text or ''
-    entities = message.caption_entities or message.entities or []
     drive_links = []
 
     try:
         if original_text:
-            original_html = convert_to_html(original_text, entities)
-            
-            drive_service = None
             url_matches = list(re.finditer(
                 r'https?://drive\.google\.com/drive/folders/[\w-]+[^\s>]*',
                 original_text
@@ -326,8 +253,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
                 if folder_id:
                     try:
-                        if not drive_service:
-                            drive_service = get_drive_service()
+                        drive_service = get_drive_service()
                         banned_items = initialize_banned_items(drive_service)
                         new_folder_id = await asyncio.get_event_loop().run_in_executor(
                                 None, copy_folder, drive_service, folder_id, banned_items
@@ -339,41 +265,40 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         await message.reply_text(f"⚠️ Error processing {url}: {str(e)}")
                         continue
 
-            final_html = process_content(original_html, drive_links)
+            final_text = process_content(original_text, drive_links)
 
         send_args = {
             'chat_id': TARGET_CHANNEL,
-            'parse_mode': 'HTML',
             'disable_notification': True
         }
 
         if message.photo:
             await context.bot.send_photo(
                 photo=message.photo[-1].file_id,
-                caption=final_html,
+                caption=final_text,
                 **send_args
             )
         elif message.video:
             await context.bot.send_video(
                 video=message.video.file_id,
-                caption=final_html,
+                caption=final_text,
                 **send_args
             )
         elif message.document:
             await context.bot.send_document(
                 document=message.document.file_id,
-                caption=final_html,
+                caption=final_text,
                 **send_args
             )
         elif message.audio:
             await context.bot.send_audio(
                 audio=message.audio.file_id,
-                caption=final_html,
+                caption=final_text,
                 **send_args
             )
         else:
             await context.bot.send_message(
-                text=final_html,
+                text=final_text,
                 **send_args
             )
 
@@ -386,16 +311,37 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         if not context.args:
-            await update.message.reply_text("❌ Usage: /ban <filename_or_folder>")
+            await update.message.reply_text("❌ Usage: /ban <filename_or_folder_or_drive_link>")
             return
 
-        item_name = ' '.join(context.args).strip()
-        if not item_name:
-            await update.message.reply_text("❌ Empty name provided")
+        input_text = ' '.join(context.args).strip()
+        if not input_text:
+            await update.message.reply_text("❌ Empty input provided")
             return
 
         drive_service = get_drive_service()
         banned_items = initialize_banned_items(drive_service)
+
+        # Check if input is a Google Drive link
+        file_id = extract_file_id(input_text)
+        folder_id = extract_folder_id(input_text)
+        
+        item_name = input_text  # default to original input
+        
+        if file_id:
+            try:
+                file_info = drive_service.files().get(fileId=file_id, fields='name').execute()
+                item_name = file_info['name']
+            except Exception as e:
+                await update.message.reply_text(f"⚠️ Could not fetch file info: {str(e)}")
+                return
+        elif folder_id:
+            try:
+                folder_info = drive_service.files().get(fileId=folder_id, fields='name').execute()
+                item_name = folder_info['name']
+            except Exception as e:
+                await update.message.reply_text(f"⚠️ Could not fetch folder info: {str(e)}")
+                return
 
         if item_name not in banned_items:
             banned_items.append(item_name)
@@ -412,16 +358,37 @@ async def ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         if not context.args:
-            await update.message.reply_text("❌ Usage: /unban <filename_or_folder>")
+            await update.message.reply_text("❌ Usage: /unban <filename_or_folder_or_drive_link>")
             return
 
-        item_name = ' '.join(context.args).strip()
-        if not item_name:
-            await update.message.reply_text("❌ Empty name provided")
+        input_text = ' '.join(context.args).strip()
+        if not input_text:
+            await update.message.reply_text("❌ Empty input provided")
             return
 
         drive_service = get_drive_service()
         banned_items = initialize_banned_items(drive_service)
+
+        # Check if input is a Google Drive link
+        file_id = extract_file_id(input_text)
+        folder_id = extract_folder_id(input_text)
+        
+        item_name = input_text  # default to original input
+        
+        if file_id:
+            try:
+                file_info = drive_service.files().get(fileId=file_id, fields='name').execute()
+                item_name = file_info['name']
+            except Exception as e:
+                await update.message.reply_text(f"⚠️ Could not fetch file info: {str(e)}")
+                return
+        elif folder_id:
+            try:
+                folder_info = drive_service.files().get(fileId=folder_id, fields='name').execute()
+                item_name = folder_info['name']
+            except Exception as e:
+                await update.message.reply_text(f"⚠️ Could not fetch folder info: {str(e)}")
+                return
 
         if item_name in banned_items:
             banned_items.remove(item_name)
@@ -454,8 +421,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🚀 TechZoneX Auto Forward Bot\n\n"
         "Send any post with Google Drive links for processing!\n"
-        "Admins: Use /ban <name> to block files/folders\n"
-        "Use /unban <name> to unblock files/folders"
+        "Admins: Use /ban <name_or_link> to block files/folders\n"
+        "Use /unban <name_or_link> to unblock files/folders"
     )
 
 def main():
