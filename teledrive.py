@@ -6,7 +6,7 @@ import asyncio
 import traceback
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseUpload
+from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
 from google.auth.transport.requests import Request
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -20,6 +20,7 @@ PHASE3_SOURCE = '12V7EnRIYcSgEtt0PR5fhV8cO22nzYuiv'
 SHORT_LINKS = ["rb.gy/cd8ugy", "bit.ly/3UcvhlA", "t.ly/CfcVB", "cutt.ly/Kee3oiLO"]
 TARGET_CHANNEL = "@techworld196"
 BANNED_FILE_ID = '1B5GAAtzpuH_XNGyUiJIMDlB9hJfxkg8r'
+REPLACE_FILE_ID = '1HK79HS_a3lVZd30HEytp0flPqa1cIVn7'
 
 # Initialize banned items from Google Drive
 def initialize_banned_items(service):
@@ -38,6 +39,34 @@ def save_banned_items(service, banned_items):
         service.files().update(fileId=BANNED_FILE_ID, media_body=media_body).execute()
     except Exception as e:
         print(f"Error saving banned items: {str(e)}")
+
+def initialize_replace_rules(service):
+    try:
+        request = service.files().get_media(fileId=REPLACE_FILE_ID)
+        fh = io.BytesIO()
+        downloader = MediaIoBaseDownload(fh, request)
+        done = False
+        while done is False:
+            status, done = downloader.next_chunk()
+        
+        replace_rules = []
+        content = fh.getvalue().decode('utf-8')
+        for line in content.splitlines():
+            if line.strip() and '|' in line:
+                old, new = line.split('|', 1)
+                replace_rules.append((old.strip(), new.strip()))
+        return replace_rules
+    except Exception as e:
+        print(f"Error initializing replace rules: {str(e)}")
+        return []
+
+def save_replace_rules(service, replace_rules):
+    try:
+        content = '\n'.join([f"{old}|{new}" for old, new in replace_rules])
+        media_body = MediaIoBaseUpload(io.BytesIO(content.encode('utf-8'), mimetype='text/plain')
+        service.files().update(fileId=REPLACE_FILE_ID, media_body=media_body).execute()
+    except Exception as e:
+        print(f"Error saving replace rules: {str(e)}")
 
 def get_drive_service():
     creds = None
@@ -226,9 +255,26 @@ def rename_video_files(service, folder_id):
         if not page_token:
             break
 
-def process_content(original_text, drive_links):
+def process_content(original_text, drive_links, replace_rules):
+    # Apply replacement rules
+    for old_text, new_text in replace_rules:
+        original_text = original_text.replace(old_text, new_text)
+    
+    # Replace drive links
     for old_url, new_url in drive_links:
         original_text = original_text.replace(old_url, new_url)
+    
+    # Clear everything after the last drive link + short URL
+    if drive_links:
+        # Find the position of the last replacement
+        last_pos = 0
+        for old_url, new_url in drive_links:
+            pos = original_text.rfind(new_url)
+            if pos != -1 and pos > last_pos:
+                last_pos = pos + len(new_url)
+        
+        # Keep only up to the last replacement
+        original_text = original_text[:last_pos]
     
     return original_text.strip()
 
@@ -241,6 +287,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     drive_links = []
 
     try:
+        drive_service = get_drive_service()
+        banned_items = initialize_banned_items(drive_service)
+        replace_rules = initialize_replace_rules(drive_service)
+
         if original_text:
             url_matches = list(re.finditer(
                 r'https?://drive\.google\.com/drive/folders/[\w-]+[^\s>]*',
@@ -253,8 +303,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
                 if folder_id:
                     try:
-                        drive_service = get_drive_service()
-                        banned_items = initialize_banned_items(drive_service)
                         new_folder_id = await asyncio.get_event_loop().run_in_executor(
                                 None, copy_folder, drive_service, folder_id, banned_items
                             )
@@ -265,7 +313,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         await message.reply_text(f"⚠️ Error processing {url}: {str(e)}")
                         continue
 
-            final_text = process_content(original_text, drive_links)
+            final_text = process_content(original_text, drive_links, replace_rules)
 
         send_args = {
             'chat_id': TARGET_CHANNEL,
@@ -402,6 +450,40 @@ async def unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"⚠️ Unban failed: {str(e)}")
 
+async def replace(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        if len(context.args) < 2:
+            await update.message.reply_text("❌ Usage: /replace <old_text> <new_text>")
+            return
+
+        old_text = ' '.join(context.args[:-1]).strip()
+        new_text = context.args[-1].strip()
+
+        if not old_text or not new_text:
+            await update.message.reply_text("❌ Both old and new text must be provided")
+            return
+
+        drive_service = get_drive_service()
+        replace_rules = initialize_replace_rules(drive_service)
+
+        # Check if replacement rule already exists
+        exists = any(old == old_text for old, new in replace_rules)
+        
+        if exists:
+            # Update existing rule
+            replace_rules = [(old, new_text if old == old_text else new) for old, new in replace_rules]
+            response_text = f"✅ Updated replacement: '{old_text}' → '{new_text}'"
+        else:
+            # Add new rule
+            replace_rules.append((old_text, new_text))
+            response_text = f"✅ Added replacement: '{old_text}' → '{new_text}'"
+
+        save_replace_rules(drive_service, replace_rules)
+        await update.message.reply_text(response_text)
+
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Replace failed: {str(e)}")
+
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     error = context.error
     tb_list = traceback.format_exception(type(error), error, error.__traceback__)
@@ -421,8 +503,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🚀 TechZoneX Auto Forward Bot\n\n"
         "Send any post with Google Drive links for processing!\n"
-        "Admins: Use /ban <name_or_link> to block files/folders\n"
-        "Use /unban <name_or_link> to unblock files/folders"
+        "Admins:\n"
+        "/ban <name_or_link> - Block files/folders\n"
+        "/unban <name_or_link> - Unblock files/folders\n"
+        "/replace <old> <new> - Replace text in posts"
     )
 
 def main():
@@ -431,6 +515,7 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("ban", ban))
     application.add_handler(CommandHandler("unban", unban))
+    application.add_handler(CommandHandler("replace", replace))
     
     application.add_handler(MessageHandler(
         filters.CAPTION | filters.TEXT | filters.PHOTO |
