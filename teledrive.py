@@ -21,18 +21,6 @@ SHORT_LINKS = ["rb.gy/cd8ugy", "bit.ly/3UcvhlA", "t.ly/CfcVB", "cutt.ly/Kee3oiLO
 TARGET_CHANNEL = "@techworld196"
 BANNED_FILE_ID = '1B5GAAtzpuH_XNGyUiJIMDlB9hJfxkg8r'
 
-def filter_entities(entities):
-    """Keep only the formatting types we want to preserve"""
-    allowed_types = {
-        'bold', 'italic', 'code', 'pre',       # Basic formatting
-        'strikethrough', 'text_link',          # Strikethrough and links
-        'blockquote'                           # Quote formatting
-    }
-    return [
-        e for e in entities 
-        if (isinstance(e.type, str) and e.type.lower() in allowed_types)
-    ]
-
 def get_drive_service():
     """Initialize and return Google Drive service"""
     creds = None
@@ -267,8 +255,59 @@ def rename_files_and_folders(service, folder_id):
         if not page_token:
             break
 
+def validate_entity_positions(text, entities):
+    """Ensure entities align with UTF-16 character boundaries"""
+    if not entities:
+        return []
+    
+    valid_entities = []
+    text_utf16 = text.encode('utf-16-le')
+    
+    for entity in entities:
+        try:
+            start = entity.offset * 2
+            end = start + (entity.length * 2)
+            
+            if start >= len(text_utf16) or end > len(text_utf16):
+                continue
+                
+            # Validate the substring
+            _ = text_utf16[start:end].decode('utf-16-le')
+            
+            if entity.type == MessageEntity.TEXT_LINK:
+                valid_entities.append(MessageEntity(
+                    type=entity.type,
+                    offset=entity.offset,
+                    length=entity.length,
+                    url=entity.url
+                ))
+            else:
+                valid_entities.append(MessageEntity(
+                    type=entity.type,
+                    offset=entity.offset,
+                    length=entity.length
+                ))
+        except Exception as e:
+            print(f"Skipping invalid entity: {str(e)}")
+            continue
+            
+    return valid_entities
+
+def filter_entities(entities):
+    """Filter to only basic formatting entities"""
+    allowed_types = {
+        MessageEntity.BOLD,
+        MessageEntity.ITALIC,
+        MessageEntity.CODE,
+        MessageEntity.PRE,
+        MessageEntity.UNDERLINE,
+        MessageEntity.STRIKETHROUGH,
+        MessageEntity.TEXT_LINK
+    }
+    return [e for e in entities if e.type in allowed_types] if entities else []
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle incoming messages with proper formatting support"""
+    """Handle incoming messages"""
     message = update.message
     if not message or (message.text and message.text.startswith('/')):
         return
@@ -313,49 +352,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 final_text = original_text
 
             # Process entities
-            filtered_entities = filter_entities(original_entities) if original_entities else []
-            
-            # Rebuild entities with only supported attributes
-            final_entities = []
-            for entity in filtered_entities:
-                if entity.offset >= len(final_text):
-                    continue
-                    
-                new_length = min(entity.length, len(final_text) - entity.offset)
-                if new_length <= 0:
-                    continue
-
-                # Handle each entity type specifically
-                if entity.type == 'text_link':
-                    final_entities.append(MessageEntity(
-                        type='text_link',
-                        offset=entity.offset,
-                        length=new_length,
-                        url=entity.url
-                    ))
-                elif entity.type == 'blockquote':
-                    final_entities.append(MessageEntity(
-                        type='blockquote',
-                        offset=entity.offset,
-                        length=new_length
-                    ))
-                else:  # bold, italic, code, pre, strikethrough
-                    final_entities.append(MessageEntity(
-                        type=entity.type,
-                        offset=entity.offset,
-                        length=new_length
-                    ))
-
+            filtered_entities = filter_entities(original_entities)
+            valid_entities = validate_entity_positions(final_text, filtered_entities)
         else:
             final_text = ''
-            final_entities = []
+            valid_entities = []
 
         # Prepare message arguments
         send_args = {
             'chat_id': TARGET_CHANNEL,
             'disable_notification': True,
             'caption': final_text,
-            'caption_entities': final_entities
+            'caption_entities': valid_entities
         }
 
         # Forward message with appropriate media type
@@ -382,7 +390,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await context.bot.send_message(
                 text=final_text,
-                entities=final_entities,
+                entities=valid_entities,
                 disable_notification=True,
                 chat_id=TARGET_CHANNEL
             )
@@ -517,4 +525,27 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     """Start the bot"""
-    application = Application.builder().token(BOT_TOKEN).
+    application = Application.builder().token(BOT_TOKEN).build()
+    
+    # Command handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("ban", ban))
+    application.add_handler(CommandHandler("unban", unban))
+    
+    # Message handler
+    application.add_handler(MessageHandler(
+        filters.CAPTION | filters.TEXT | filters.PHOTO |
+        filters.VIDEO | filters.Document.ALL | filters.AUDIO &
+        ~filters.COMMAND,
+        handle_message
+    ))
+    
+    # Error handler
+    application.add_error_handler(error_handler)
+    
+    # Start polling
+    print("🤖 Bot is running with enhanced renaming features...")
+    application.run_polling()
+
+if __name__ == "__main__":
+    main()
