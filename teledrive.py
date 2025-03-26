@@ -83,6 +83,16 @@ def save_replace_rules(service, rules):
     except Exception as e:
         print(f"Error saving replace rules: {str(e)}")
 
+def clear_replace_rules(service):
+    """Clear all replacement rules"""
+    try:
+        media = MediaIoBaseUpload(io.BytesIO(b''), mimetype='text/plain')
+        service.files().update(fileId=REPLACE_FILE_ID, media_body=media).execute()
+        return True
+    except Exception as e:
+        print(f"Error clearing replace rules: {str(e)}")
+        return False
+
 def extract_folder_id(url):
     """Extract folder ID from Google Drive URL"""
     match = re.search(r'/folders/([a-zA-Z0-9-_]+)', url)
@@ -268,8 +278,46 @@ def rename_video_files(service, folder_id):
         if not page_token:
             break
 
+def validate_entity_positions(text, entities):
+    """Ensure entities align with UTF-16 character boundaries"""
+    if not entities:
+        return []
+    
+    valid_entities = []
+    text_utf16 = text.encode('utf-16-le')
+    
+    for entity in entities:
+        try:
+            start = entity.offset * 2
+            end = start + (entity.length * 2)
+            
+            if start >= len(text_utf16) or end > len(text_utf16):
+                continue
+                
+            # Validate the substring
+            _ = text_utf16[start:end].decode('utf-16-le')
+            
+            if entity.type == MessageEntity.TEXT_LINK:
+                valid_entities.append(MessageEntity(
+                    type=entity.type,
+                    offset=entity.offset,
+                    length=entity.length,
+                    url=entity.url
+                ))
+            else:
+                valid_entities.append(MessageEntity(
+                    type=entity.type,
+                    offset=entity.offset,
+                    length=entity.length
+                ))
+        except Exception as e:
+            print(f"Skipping invalid entity: {str(e)}")
+            continue
+            
+    return valid_entities
+
 def filter_entities(entities):
-    """Filter and keep only basic formatting entities (no custom emoji)"""
+    """Filter to only basic formatting entities"""
     allowed_types = {
         MessageEntity.BOLD,
         MessageEntity.ITALIC,
@@ -281,35 +329,29 @@ def filter_entities(entities):
     }
     return [e for e in entities if e.type in allowed_types] if entities else []
 
-def process_entities(original_entities, text):
-    """Process entities to match the final text length"""
-    processed = []
-    for entity in filter_entities(original_entities):
-        if entity.offset >= len(text):
-            continue
-            
-        max_length = len(text) - entity.offset
-        new_length = min(entity.length, max_length)
-        if new_length <= 0:
-            continue
-
-        if entity.type == MessageEntity.TEXT_LINK:
-            processed.append(MessageEntity(
-                type=entity.type,
-                offset=entity.offset,
-                length=new_length,
-                url=entity.url
-            ))
-        else:
-            processed.append(MessageEntity(
-                type=entity.type,
-                offset=entity.offset,
-                length=new_length
-            ))
-    return processed
+def process_message_content(text, entities, replace_rules, drive_links):
+    """Process message content with proper entity handling"""
+    # Apply replacement rules
+    for old_text, new_text in replace_rules:
+        text = text.replace(old_text, new_text)
+    
+    # Apply drive link replacements
+    for old_url, new_url in drive_links:
+        text = text.replace(old_url, new_url)
+    
+    # Truncate after last drive link if any
+    if drive_links:
+        last_pos = text.rfind(drive_links[-1][1]) + len(drive_links[-1][1])
+        text = text[:last_pos].strip()
+    
+    # Process entities
+    filtered_entities = filter_entities(entities)
+    valid_entities = validate_entity_positions(text, filtered_entities)
+    
+    return text, valid_entities
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle incoming messages and process them"""
+    """Handle incoming messages with safe entity processing"""
     message = update.message
     if not message or (message.text and message.text.startswith('/')):
         return
@@ -324,11 +366,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         replace_rules = initialize_replace_rules(drive_service)
 
         if original_text:
-            # Apply replacement rules
-            for old_text, new_text in replace_rules:
-                original_text = original_text.replace(old_text, new_text)
-
-            # Process drive links
+            # Process Google Drive links
             url_matches = list(re.finditer(
                 r'https?://drive\.google\.com/drive/folders/[\w-]+[^\s>]*',
                 original_text
@@ -341,25 +379,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if folder_id:
                     try:
                         new_folder_id = await asyncio.get_event_loop().run_in_executor(
-                                None, copy_folder, drive_service, folder_id, banned_items
-                            )
+                            None, copy_folder, drive_service, folder_id, banned_items
+                        )
                         random_link = random.choice(SHORT_LINKS)
                         new_url = f'https://drive.google.com/drive/folders/{new_folder_id} {random_link}'
                         drive_links.append((url, new_url))
-                        original_text = original_text.replace(url, new_url)
                     except Exception as e:
                         await message.reply_text(f"⚠️ Error processing {url}: {str(e)}")
                         continue
 
-            # Truncate text after last drive link
-            if drive_links:
-                last_pos = original_text.rfind(drive_links[-1][1]) + len(drive_links[-1][1])
-                final_text = original_text[:last_pos].strip()
-            else:
-                final_text = original_text
-
-            # Process entities for formatting
-            processed_entities = process_entities(original_entities, final_text)
+            # Process message content and entities
+            final_text, processed_entities = process_message_content(
+                original_text,
+                original_entities,
+                replace_rules,
+                drive_links
+            )
         else:
             final_text = ''
             processed_entities = []
@@ -544,12 +579,12 @@ async def replacex(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Clear all replacement rules"""
     try:
         drive_service = get_drive_service()
-        # Create empty content
-        media = MediaIoBaseUpload(io.BytesIO(b''), mimetype='text/plain')
-        service.files().update(fileId=REPLACE_FILE_ID, media_body=media).execute()
-        await update.message.reply_text("✅ All replacement rules have been cleared.")
+        if clear_replace_rules(drive_service):
+            await update.message.reply_text("✅ All replacement rules have been cleared.")
+        else:
+            await update.message.reply_text("⚠️ Failed to clear replacement rules.")
     except Exception as e:
-        await update.message.reply_text(f"⚠️ Failed to clear replacement rules: {str(e)}")
+        await update.message.reply_text(f"⚠️ Error clearing rules: {str(e)}")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Send welcome message with bot instructions"""
@@ -602,7 +637,7 @@ def main():
     application.add_error_handler(error_handler)
     
     # Start polling
-    print("🤖 Bot is running...")
+    print("🤖 Bot is running with safe entity processing...")
     application.run_polling()
 
 if __name__ == "__main__":
