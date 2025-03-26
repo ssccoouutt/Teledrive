@@ -258,14 +258,13 @@ def rename_files_and_folders(service, folder_id):
 def filter_entities(entities):
     """Filter to only supported formatting entities"""
     allowed_types = {
-        MessageEntity.BOLD,
-        MessageEntity.ITALIC,
-        MessageEntity.CODE,
-        MessageEntity.PRE,
-        MessageEntity.TEXT_LINK,
-        MessageEntity.BLOCKQUOTE,
-        MessageEntity.UNDERLINE,
-        MessageEntity.STRIKETHROUGH
+        MessageEntity.BOLD,          # Bold text
+        MessageEntity.ITALIC,        # Italic text
+        MessageEntity.CODE,          # Monospace (code)
+        MessageEntity.PRE,           # Blockquote/preformatted
+        MessageEntity.TEXT_LINK,     # Wrapped links
+        MessageEntity.UNDERLINE,     # Underlined text
+        MessageEntity.STRIKETHROUGH  # Strikethrough text
     }
     return [e for e in entities if e.type in allowed_types] if entities else []
 
