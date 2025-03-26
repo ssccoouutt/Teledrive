@@ -255,11 +255,51 @@ def rename_files_and_folders(service, folder_id):
         if not page_token:
             break
 
+def filter_entities(entities):
+    """Filter to only supported formatting entities"""
+    allowed_types = {
+        MessageEntity.BOLD,
+        MessageEntity.ITALIC,
+        MessageEntity.CODE,
+        MessageEntity.PRE,
+        MessageEntity.TEXT_LINK,
+        MessageEntity.BLOCKQUOTE,
+        MessageEntity.UNDERLINE,
+        MessageEntity.STRIKETHROUGH
+    }
+    return [e for e in entities if e.type in allowed_types] if entities else []
+
+def adjust_entity_positions(original_text, modified_text, original_entities):
+    """Adjust entity positions after text modifications"""
+    adjusted_entities = []
+    for entity in original_entities:
+        try:
+            # Find original text segment
+            original_segment = original_text[entity.offset:entity.offset+entity.length]
+            
+            # Find new position in modified text
+            new_offset = modified_text.find(original_segment)
+            if new_offset != -1:
+                if entity.type == MessageEntity.TEXT_LINK:
+                    adjusted_entities.append(MessageEntity(
+                        type=entity.type,
+                        offset=new_offset,
+                        length=len(original_segment),
+                        url=entity.url
+                    ))
+                else:
+                    adjusted_entities.append(MessageEntity(
+                        type=entity.type,
+                        offset=new_offset,
+                        length=len(original_segment)
+                    ))
+        except Exception as e:
+            print(f"Skipping entity adjustment: {str(e)}")
+            continue
+    return adjusted_entities
+
 def validate_entity_positions(text, entities):
     """Ensure entities align with UTF-16 character boundaries"""
-    if not entities:
-        return []
-    
     valid_entities = []
     text_utf16 = text.encode('utf-16-le')
     
@@ -293,21 +333,8 @@ def validate_entity_positions(text, entities):
             
     return valid_entities
 
-def filter_entities(entities):
-    """Filter to only basic formatting entities"""
-    allowed_types = {
-        MessageEntity.BOLD,
-        MessageEntity.ITALIC,
-        MessageEntity.CODE,
-        MessageEntity.PRE,
-        MessageEntity.UNDERLINE,
-        MessageEntity.STRIKETHROUGH,
-        MessageEntity.TEXT_LINK
-    }
-    return [e for e in entities if e.type in allowed_types] if entities else []
-
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle incoming messages"""
+    """Handle incoming messages with proper formatting support"""
     message = update.message
     if not message or (message.text and message.text.startswith('/')):
         return
@@ -353,7 +380,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             # Process entities
             filtered_entities = filter_entities(original_entities)
-            valid_entities = validate_entity_positions(final_text, filtered_entities)
+            adjusted_entities = adjust_entity_positions(original_text, final_text, filtered_entities)
+            valid_entities = validate_entity_positions(final_text, adjusted_entities)
         else:
             final_text = ''
             valid_entities = []
@@ -544,7 +572,7 @@ def main():
     application.add_error_handler(error_handler)
     
     # Start polling
-    print("🤖 Bot is running with enhanced renaming features...")
+    print("🤖 Bot is running with enhanced formatting and renaming...")
     application.run_polling()
 
 if __name__ == "__main__":
