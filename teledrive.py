@@ -20,7 +20,6 @@ PHASE3_SOURCE = '12V7EnRIYcSgEtt0PR5fhV8cO22nzYuiv'
 SHORT_LINKS = ["rb.gy/cd8ugy", "bit.ly/3UcvhlA", "t.ly/CfcVB", "cutt.ly/Kee3oiLO"]
 TARGET_CHANNEL = "@techworld196"
 BANNED_FILE_ID = '1B5GAAtzpuH_XNGyUiJIMDlB9hJfxkg8r'
-REPLACE_FILE_ID = '1HK79HS_a3lVZd30HEytp0flPqa1cIVn7'
 
 def get_drive_service():
     """Initialize and return Google Drive service"""
@@ -54,45 +53,6 @@ def save_banned_items(service, banned_items):
     except Exception as e:
         print(f"Error saving banned items: {str(e)}")
 
-def initialize_replace_rules(service):
-    """Load text replacement rules from Google Drive"""
-    try:
-        request = service.files().get_media(fileId=REPLACE_FILE_ID)
-        fh = io.BytesIO()
-        downloader = MediaIoBaseDownload(fh, request)
-        done = False
-        while not done:
-            _, done = downloader.next_chunk()
-        
-        rules = []
-        for line in fh.getvalue().decode('utf-8').splitlines():
-            if line.strip() and '|' in line:
-                old, new = line.split('|', 1)
-                rules.append((old.strip(), new.strip()))
-        return rules
-    except Exception as e:
-        print(f"Error loading replace rules: {str(e)}")
-        return []
-
-def save_replace_rules(service, rules):
-    """Save replacement rules to Google Drive"""
-    try:
-        content = '\n'.join([f"{old}|{new}" for old, new in rules])
-        media = MediaIoBaseUpload(io.BytesIO(content.encode('utf-8')), mimetype='text/plain')
-        service.files().update(fileId=REPLACE_FILE_ID, media_body=media).execute()
-    except Exception as e:
-        print(f"Error saving replace rules: {str(e)}")
-
-def clear_replace_rules(service):
-    """Clear all replacement rules"""
-    try:
-        media = MediaIoBaseUpload(io.BytesIO(b''), mimetype='text/plain')
-        service.files().update(fileId=REPLACE_FILE_ID, media_body=media).execute()
-        return True
-    except Exception as e:
-        print(f"Error clearing replace rules: {str(e)}")
-        return False
-
 def extract_folder_id(url):
     """Extract folder ID from Google Drive URL"""
     match = re.search(r'/folders/([a-zA-Z0-9-_]+)', url)
@@ -124,10 +84,10 @@ def copy_folder(service, folder_id, banned_items):
             copy_files_only(service, PHASE2_SOURCE, subfolder_id, banned_items, overwrite=True)
 
         copy_bonus_content(service, PHASE3_SOURCE, new_folder_id, banned_items, overwrite=True)
-        rename_video_files(service, new_folder_id)
+        rename_files_and_folders(service, new_folder_id)
         
         for subfolder_id in subfolders:
-            rename_video_files(service, subfolder_id)
+            rename_files_and_folders(service, subfolder_id)
 
         return new_folder_id
     except Exception as e:
@@ -256,65 +216,50 @@ def copy_folder_contents(service, source_id, dest_id, banned_items):
         if not page_token:
             break
 
-def rename_video_files(service, folder_id):
-    """Rename video files in folder with Telegram watermark"""
+def rename_files_and_folders(service, folder_id):
+    """Rename files and folders with both @mentions and .mp4 patterns"""
     page_token = None
     while True:
         response = service.files().list(
-            q=f"'{folder_id}' in parents and mimeType='video/mp4'",
-            fields='nextPageToken, files(id,name)',
+            q=f"'{folder_id}' in parents",
+            fields='nextPageToken, files(id, name, mimeType)',
             pageToken=page_token
         ).execute()
         
         for item in response.get('files', []):
-            if item['name'].endswith('.mp4'):
-                new_name = item['name'].replace('.mp4', ' (Telegram@TechZoneX).mp4')
-                service.files().update(
-                    fileId=item['id'],
-                    body={'name': new_name}
-                ).execute()
+            try:
+                current_name = item['name']
+                new_name = current_name
+                
+                # First check for @[any text] pattern
+                at_pattern = re.compile(r'@\w+')
+                at_match = at_pattern.search(current_name)
+                
+                if at_match:
+                    # Replace any @mention with @TechZoneX
+                    new_name = at_pattern.sub('@TechZoneX', current_name)
+                elif item['mimeType'] == 'video/mp4' and current_name.endswith('.mp4'):
+                    # Only add watermark if not an @mention file and is mp4
+                    new_name = current_name.replace('.mp4', ' (Telegram@TechZoneX).mp4')
+                
+                if new_name != current_name:
+                    service.files().update(
+                        fileId=item['id'],
+                        body={'name': new_name}
+                    ).execute()
+            except Exception as e:
+                print(f"Error renaming {item['name']}: {str(e)}")
+                continue
         
         page_token = response.get('nextPageToken')
         if not page_token:
             break
 
-def apply_text_replacements(text, replace_rules):
-    """Apply all text replacements from replace.txt"""
-    for old_text, new_text in replace_rules:
-        text = text.replace(old_text, new_text)
-    return text
-
-def adjust_entity_positions(original_text, modified_text, original_entities):
-    """Adjust entity positions after text replacements"""
-    adjusted_entities = []
-    for entity in original_entities:
-        try:
-            # Find original text segment
-            original_segment = original_text[entity.offset:entity.offset+entity.length]
-            
-            # Find new position in modified text
-            new_offset = modified_text.find(original_segment)
-            if new_offset != -1:
-                if entity.type == MessageEntity.TEXT_LINK:
-                    adjusted_entities.append(MessageEntity(
-                        type=entity.type,
-                        offset=new_offset,
-                        length=len(original_segment),
-                        url=entity.url
-                    ))
-                else:
-                    adjusted_entities.append(MessageEntity(
-                        type=entity.type,
-                        offset=new_offset,
-                        length=len(original_segment)
-                    ))
-        except Exception as e:
-            print(f"Skipping entity adjustment: {str(e)}")
-            continue
-    return adjusted_entities
-
 def validate_entity_positions(text, entities):
     """Ensure entities align with UTF-16 character boundaries"""
+    if not entities:
+        return []
+    
     valid_entities = []
     text_utf16 = text.encode('utf-16-le')
     
@@ -362,7 +307,7 @@ def filter_entities(entities):
     return [e for e in entities if e.type in allowed_types] if entities else []
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle incoming messages with proper replacement and formatting order"""
+    """Handle incoming messages"""
     message = update.message
     if not message or (message.text and message.text.startswith('/')):
         return
@@ -374,51 +319,44 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         drive_service = get_drive_service()
         banned_items = initialize_banned_items(drive_service)
-        replace_rules = initialize_replace_rules(drive_service)
 
-        # 1. Apply text replacements FIRST
-        replaced_text = apply_text_replacements(original_text, replace_rules)
-        
-        # 2. Process Google Drive links AFTER replacements
-        url_matches = list(re.finditer(
-            r'https?://drive\.google\.com/drive/folders/[\w-]+[^\s>]*',
-            replaced_text
-        ))
-        
-        for match in url_matches:
-            url = match.group()
-            folder_id = extract_folder_id(url)
+        if original_text:
+            # Process Google Drive links
+            url_matches = list(re.finditer(
+                r'https?://drive\.google\.com/drive/folders/[\w-]+[^\s>]*',
+                original_text
+            ))
             
-            if folder_id:
-                try:
-                    new_folder_id = await asyncio.get_event_loop().run_in_executor(
-                        None, copy_folder, drive_service, folder_id, banned_items
-                    )
-                    random_link = random.choice(SHORT_LINKS)
-                    new_url = f'https://drive.google.com/drive/folders/{new_folder_id} {random_link}'
-                    drive_links.append((url, new_url))
-                    replaced_text = replaced_text.replace(url, new_url)
-                except Exception as e:
-                    await message.reply_text(f"⚠️ Error processing {url}: {str(e)}")
-                    continue
+            for match in url_matches:
+                url = match.group()
+                folder_id = extract_folder_id(url)
+                
+                if folder_id:
+                    try:
+                        new_folder_id = await asyncio.get_event_loop().run_in_executor(
+                            None, copy_folder, drive_service, folder_id, banned_items
+                        )
+                        random_link = random.choice(SHORT_LINKS)
+                        new_url = f'https://drive.google.com/drive/folders/{new_folder_id} {random_link}'
+                        drive_links.append((url, new_url))
+                        original_text = original_text.replace(url, new_url)
+                    except Exception as e:
+                        await message.reply_text(f"⚠️ Error processing {url}: {str(e)}")
+                        continue
 
-        # 3. Adjust entities after replacements
-        adjusted_entities = adjust_entity_positions(
-            original_text,
-            replaced_text,
-            original_entities
-        )
-        
-        # 4. Filter and validate entities
-        filtered_entities = filter_entities(adjusted_entities)
-        valid_entities = validate_entity_positions(replaced_text, filtered_entities)
-        
-        # 5. Truncate after last drive link if any
-        if drive_links:
-            last_pos = replaced_text.rfind(drive_links[-1][1]) + len(drive_links[-1][1])
-            final_text = replaced_text[:last_pos].strip()
+            # Truncate after last drive link if any
+            if drive_links:
+                last_pos = original_text.rfind(drive_links[-1][1]) + len(drive_links[-1][1])
+                final_text = original_text[:last_pos].strip()
+            else:
+                final_text = original_text
+
+            # Process entities
+            filtered_entities = filter_entities(original_entities)
+            valid_entities = validate_entity_positions(final_text, filtered_entities)
         else:
-            final_text = replaced_text
+            final_text = ''
+            valid_entities = []
 
         # Prepare message arguments
         send_args = {
@@ -559,54 +497,6 @@ async def unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"⚠️ Unban failed: {str(e)}")
 
-async def replace(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Add or update a text replacement rule"""
-    try:
-        args_str = ' '.join(context.args).strip() if context.args else ''
-        if not args_str:
-            await update.message.reply_text("❌ Usage: /replace <old_text> to <new_text>")
-            return
-
-        split_index = args_str.rfind(' to ')
-        if split_index == -1:
-            await update.message.reply_text("❌ Invalid format. Use ' to ' to separate old and new text.")
-            return
-
-        old_text = args_str[:split_index].strip()
-        new_text = args_str[split_index+4:].strip()
-
-        if not old_text or not new_text:
-            await update.message.reply_text("❌ Both old and new text must be provided.")
-            return
-
-        drive_service = get_drive_service()
-        replace_rules = initialize_replace_rules(drive_service)
-
-        exists = any(old == old_text for old, new in replace_rules)
-        if exists:
-            replace_rules = [(old, new_text if old == old_text else new) for old, new in replace_rules]
-            response_text = f"✅ Updated replacement: '{old_text}' → '{new_text}'"
-        else:
-            replace_rules.append((old_text, new_text))
-            response_text = f"✅ Added replacement: '{old_text}' → '{new_text}'"
-
-        save_replace_rules(drive_service, replace_rules)
-        await update.message.reply_text(response_text)
-
-    except Exception as e:
-        await update.message.reply_text(f"⚠️ Replace failed: {str(e)}")
-
-async def replacex(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Clear all replacement rules"""
-    try:
-        drive_service = get_drive_service()
-        if clear_replace_rules(drive_service):
-            await update.message.reply_text("✅ All replacement rules have been cleared.")
-        else:
-            await update.message.reply_text("⚠️ Failed to clear replacement rules.")
-    except Exception as e:
-        await update.message.reply_text(f"⚠️ Error clearing rules: {str(e)}")
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Send welcome message with bot instructions"""
     await update.message.reply_text(
@@ -614,9 +504,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Send any post with Google Drive links for processing!\n"
         "Admins:\n"
         "/ban <name_or_link> - Block files/folders\n"
-        "/unban <name_or_link> - Unblock files/folders\n"
-        "/replace <old_text> to <new_text> - Replace text in posts\n"
-        "/replacex - Clear all replacement rules"
+        "/unban <name_or_link> - Unblock files/folders"
     )
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -643,8 +531,6 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("ban", ban))
     application.add_handler(CommandHandler("unban", unban))
-    application.add_handler(CommandHandler("replace", replace))
-    application.add_handler(CommandHandler("replacex", replacex))
     
     # Message handler
     application.add_handler(MessageHandler(
@@ -658,7 +544,7 @@ def main():
     application.add_error_handler(error_handler)
     
     # Start polling
-    print("🤖 Bot is running with proper replacement ordering...")
+    print("🤖 Bot is running with enhanced renaming features...")
     application.run_polling()
 
 if __name__ == "__main__":
