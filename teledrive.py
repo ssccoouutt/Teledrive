@@ -269,19 +269,22 @@ def rename_video_files(service, folder_id):
             break
 
 def filter_entities(entities):
-    """Filter and keep only supported formatting entities"""
+    """Filter and keep only basic formatting entities (no custom emoji)"""
     allowed_types = {
-        MessageEntity.BOLD, MessageEntity.ITALIC,
-        MessageEntity.CODE, MessageEntity.PRE,
-        MessageEntity.STRIKETHROUGH, MessageEntity.TEXT_LINK,
-        MessageEntity.UNDERLINE
+        MessageEntity.BOLD,
+        MessageEntity.ITALIC,
+        MessageEntity.CODE,
+        MessageEntity.PRE,
+        MessageEntity.UNDERLINE,
+        MessageEntity.STRIKETHROUGH,
+        MessageEntity.TEXT_LINK
     }
     return [e for e in entities if e.type in allowed_types] if entities else []
 
 def process_entities(original_entities, text):
     """Process entities to match the final text length"""
     processed = []
-    for entity in original_entities or []:
+    for entity in filter_entities(original_entities):
         if entity.offset >= len(text):
             continue
             
@@ -538,29 +541,15 @@ async def replace(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"⚠️ Replace failed: {str(e)}")
 
 async def replacex(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Remove a text replacement rule"""
+    """Clear all replacement rules"""
     try:
-        if not context.args:
-            await update.message.reply_text("❌ Usage: /replacex <old_text>")
-            return
-
-        old_text = ' '.join(context.args).strip()
-        if not old_text:
-            await update.message.reply_text("❌ Please provide the old text to remove.")
-            return
-
         drive_service = get_drive_service()
-        replace_rules = initialize_replace_rules(drive_service)
-
-        new_rules = [(old, new) for old, new in replace_rules if old != old_text]
-        if len(new_rules) < len(replace_rules):
-            save_replace_rules(drive_service, new_rules)
-            await update.message.reply_text(f"✅ Removed replacement rule for: '{old_text}'")
-        else:
-            await update.message.reply_text(f"⚠️ No replacement rule found for: '{old_text}'")
-
+        # Create empty content
+        media = MediaIoBaseUpload(io.BytesIO(b''), mimetype='text/plain')
+        service.files().update(fileId=REPLACE_FILE_ID, media_body=media).execute()
+        await update.message.reply_text("✅ All replacement rules have been cleared.")
     except Exception as e:
-        await update.message.reply_text(f"⚠️ Replacex failed: {str(e)}")
+        await update.message.reply_text(f"⚠️ Failed to clear replacement rules: {str(e)}")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Send welcome message with bot instructions"""
@@ -571,7 +560,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/ban <name_or_link> - Block files/folders\n"
         "/unban <name_or_link> - Unblock files/folders\n"
         "/replace <old_text> to <new_text> - Replace text in posts\n"
-        "/replacex <old_text> - Remove a replacement rule"
+        "/replacex - Clear all replacement rules"
     )
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
