@@ -663,14 +663,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 def main():
+    """Run the bot."""
     application = Application.builder().token(BOT_TOKEN).build()
     
+    # Register handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("ban", ban))
     application.add_handler(CommandHandler("unban", unban))
     application.add_handler(CommandHandler("replace", replace))
     
-    # Corrected message handler with proper filters
     message_filter = (
         filters.CAPTION | filters.TEXT | filters.PHOTO |
         filters.VIDEO | filters.Document.ALL | filters.AUDIO |
@@ -680,22 +681,10 @@ def main():
     ) & ~filters.COMMAND
     
     application.add_handler(MessageHandler(message_filter, handle_message))
-    
     application.add_error_handler(error_handler)
-    
-    # Add retry logic for polling
-    async def run_with_retries():
-        while True:
-            try:
-                await application.run_polling()
-            except NetworkError as e:
-                print(f"Network error: {e}. Retrying in {RETRY_DELAY} seconds...")
-                await asyncio.sleep(RETRY_DELAY)
-            except Exception as e:
-                print(f"Fatal error: {e}")
-                raise
-    
-    asyncio.run(run_with_retries())
+
+    # Run the bot until the user presses Ctrl-C
+    application.run_polling()
 
 if __name__ == "__main__":
     main()
