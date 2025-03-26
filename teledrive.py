@@ -4,14 +4,12 @@ import io
 import random
 import asyncio
 import traceback
+from telegram import Update, MessageEntity
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
 from google.auth.transport.requests import Request
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from telegram.constants import ParseMode
-from telegram.error import TelegramError, NetworkError
 
 # Configuration
 BOT_TOKEN = "7846379611:AAGzu4KM-Aq699Q8aHNt29t0YbTnDKbkXbI"
@@ -23,56 +21,9 @@ SHORT_LINKS = ["rb.gy/cd8ugy", "bit.ly/3UcvhlA", "t.ly/CfcVB", "cutt.ly/Kee3oiLO
 TARGET_CHANNEL = "@techworld196"
 BANNED_FILE_ID = '1B5GAAtzpuH_XNGyUiJIMDlB9hJfxkg8r'
 REPLACE_FILE_ID = '1HK79HS_a3lVZd30HEytp0flPqa1cIVn7'
-MAX_RETRIES = 3
-RETRY_DELAY = 5
-
-# Initialize banned items from Google Drive
-def initialize_banned_items(service):
-    try:
-        banned_file = service.files().get_media(fileId=BANNED_FILE_ID).execute()
-        banned_items = banned_file.decode('utf-8').splitlines()
-        return banned_items
-    except Exception as e:
-        print(f"Error initializing banned items: {str(e)}")
-        return []
-
-def save_banned_items(service, banned_items):
-    try:
-        banned_file_content = '\n'.join(banned_items).encode('utf-8')
-        media_body = MediaIoBaseUpload(io.BytesIO(banned_file_content), mimetype='text/plain')
-        service.files().update(fileId=BANNED_FILE_ID, media_body=media_body).execute()
-    except Exception as e:
-        print(f"Error saving banned items: {str(e)}")
-
-def initialize_replace_rules(service):
-    try:
-        request = service.files().get_media(fileId=REPLACE_FILE_ID)
-        fh = io.BytesIO()
-        downloader = MediaIoBaseDownload(fh, request)
-        done = False
-        while done is False:
-            status, done = downloader.next_chunk()
-        
-        replace_rules = []
-        content = fh.getvalue().decode('utf-8')
-        for line in content.splitlines():
-            if line.strip() and '|' in line:
-                old, new = line.split('|', 1)
-                replace_rules.append((old.strip(), new.strip()))
-        return replace_rules
-    except Exception as e:
-        print(f"Error initializing replace rules: {str(e)}")
-        return []
-
-def save_replace_rules(service, replace_rules):
-    try:
-        content = '\n'.join([f"{old}|{new}" for old, new in replace_rules])
-        media_body = MediaIoBaseUpload(io.BytesIO(content.encode('utf-8')), mimetype='text/plain')
-        service.files().update(fileId=REPLACE_FILE_ID, media_body=media_body).execute()
-    except Exception as e:
-        print(f"Error saving replace rules: {str(e)}")
 
 def get_drive_service():
+    """Initialize and return Google Drive service"""
     creds = None
     if os.path.exists(TOKEN_PATH):
         creds = Credentials.from_authorized_user_file(TOKEN_PATH)
@@ -85,18 +36,69 @@ def get_drive_service():
             token.write(creds.to_json())
     return build('drive', 'v3', credentials=creds)
 
+def initialize_banned_items(service):
+    """Load banned items list from Google Drive"""
+    try:
+        banned_file = service.files().get_media(fileId=BANNED_FILE_ID).execute()
+        return banned_file.decode('utf-8').splitlines()
+    except Exception as e:
+        print(f"Error loading banned items: {str(e)}")
+        return []
+
+def save_banned_items(service, banned_items):
+    """Save banned items list to Google Drive"""
+    try:
+        content = '\n'.join(banned_items).encode('utf-8')
+        media = MediaIoBaseUpload(io.BytesIO(content), mimetype='text/plain')
+        service.files().update(fileId=BANNED_FILE_ID, media_body=media).execute()
+    except Exception as e:
+        print(f"Error saving banned items: {str(e)}")
+
+def initialize_replace_rules(service):
+    """Load text replacement rules from Google Drive"""
+    try:
+        request = service.files().get_media(fileId=REPLACE_FILE_ID)
+        fh = io.BytesIO()
+        downloader = MediaIoBaseDownload(fh, request)
+        done = False
+        while not done:
+            _, done = downloader.next_chunk()
+        
+        rules = []
+        for line in fh.getvalue().decode('utf-8').splitlines():
+            if line.strip() and '|' in line:
+                old, new = line.split('|', 1)
+                rules.append((old.strip(), new.strip()))
+        return rules
+    except Exception as e:
+        print(f"Error loading replace rules: {str(e)}")
+        return []
+
+def save_replace_rules(service, rules):
+    """Save replacement rules to Google Drive"""
+    try:
+        content = '\n'.join([f"{old}|{new}" for old, new in rules])
+        media = MediaIoBaseUpload(io.BytesIO(content.encode('utf-8')), mimetype='text/plain')
+        service.files().update(fileId=REPLACE_FILE_ID, media_body=media).execute()
+    except Exception as e:
+        print(f"Error saving replace rules: {str(e)}")
+
 def extract_folder_id(url):
+    """Extract folder ID from Google Drive URL"""
     match = re.search(r'/folders/([a-zA-Z0-9-_]+)', url)
     return match.group(1) if match else None
 
 def extract_file_id(url):
+    """Extract file ID from Google Drive URL"""
     match = re.search(r'/file/d/([a-zA-Z0-9-_]+)', url)
     return match.group(1) if match else None
 
 def should_skip_item(name, banned_items):
+    """Check if item should be skipped based on banned list"""
     return name in banned_items
 
 def copy_folder(service, folder_id, banned_items):
+    """Copy a folder and its contents"""
     try:
         folder = service.files().get(fileId=folder_id, fields='name').execute()
         new_folder = service.files().create(body={
@@ -107,11 +109,13 @@ def copy_folder(service, folder_id, banned_items):
 
         copy_folder_contents(service, folder_id, new_folder_id, banned_items)
         subfolders = get_all_subfolders_recursive(service, new_folder_id)
+        
         for subfolder_id in subfolders:
             copy_files_only(service, PHASE2_SOURCE, subfolder_id, banned_items, overwrite=True)
 
         copy_bonus_content(service, PHASE3_SOURCE, new_folder_id, banned_items, overwrite=True)
         rename_video_files(service, new_folder_id)
+        
         for subfolder_id in subfolders:
             rename_video_files(service, subfolder_id)
 
@@ -120,6 +124,7 @@ def copy_folder(service, folder_id, banned_items):
         raise Exception(f"Copy failed: {str(e)}")
 
 def get_all_subfolders_recursive(service, folder_id):
+    """Get all subfolder IDs recursively"""
     subfolders = []
     queue = [folder_id]
     
@@ -134,8 +139,7 @@ def get_all_subfolders_recursive(service, folder_id):
                 pageToken=page_token
             ).execute()
             
-            new_folders = response.get('files', [])
-            for folder in new_folders:
+            for folder in response.get('files', []):
                 subfolders.append(folder['id'])
                 queue.append(folder['id'])
             
@@ -146,6 +150,7 @@ def get_all_subfolders_recursive(service, folder_id):
     return subfolders
 
 def copy_files_only(service, source_id, dest_id, banned_items, overwrite=False):
+    """Copy files from source to destination"""
     page_token = None
     while True:
         response = service.files().list(
@@ -165,6 +170,7 @@ def copy_files_only(service, source_id, dest_id, banned_items, overwrite=False):
             break
 
 def copy_bonus_content(service, source_id, dest_id, banned_items, overwrite=False):
+    """Copy bonus content to destination"""
     page_token = None
     while True:
         response = service.files().list(
@@ -183,6 +189,7 @@ def copy_bonus_content(service, source_id, dest_id, banned_items, overwrite=Fals
             break
 
 def copy_item_to_folder(service, item, dest_folder_id, banned_items, overwrite=False):
+    """Copy individual item to destination folder"""
     try:
         if overwrite:
             existing = service.files().list(
@@ -209,6 +216,7 @@ def copy_item_to_folder(service, item, dest_folder_id, banned_items, overwrite=F
         print(f"Error copying {item['name']}: {str(e)}")
 
 def copy_folder_contents(service, source_id, dest_id, banned_items):
+    """Copy all contents from source to destination folder"""
     page_token = None
     while True:
         response = service.files().list(
@@ -239,6 +247,7 @@ def copy_folder_contents(service, source_id, dest_id, banned_items):
             break
 
 def rename_video_files(service, folder_id):
+    """Rename video files in folder with Telegram watermark"""
     page_token = None
     while True:
         response = service.files().list(
@@ -259,96 +268,51 @@ def rename_video_files(service, folder_id):
         if not page_token:
             break
 
-def convert_to_html(text, entities):
-    """Convert message text with Telegram entities to HTML while preserving only Telegram formatting"""
-    html = text
-    # Process entities in reverse order to avoid offset issues
-    for entity in sorted(
-        [e for e in entities if (e.offset + e.length) <= len(text)],
-        key=lambda x: x.offset,
-        reverse=True
-    ):
-        start = entity.offset
-        end = entity.offset + entity.length
-        content = html[start:end]
-        
-        if entity.type == 'bold':
-            replacement = f"<b>{content}</b>"
-        elif entity.type == 'italic':
-            replacement = f"<i>{content}</i>"
-        elif entity.type == 'underline':
-            replacement = f"<u>{content}</u>"
-        elif entity.type == 'strikethrough':
-            replacement = f"<s>{content}</s>"
-        elif entity.type == 'code':
-            replacement = f"<code>{content}</code>"
-        elif entity.type == 'pre':
-            replacement = f"<pre>{content}</pre>"
-        elif entity.type == 'text_link':
-            replacement = f'<a href="{entity.url}">{content}</a>'
-        elif entity.type == 'text_mention':
-            replacement = f'<a href="tg://user?id={entity.user.id}">{content}</a>'
-        elif entity.type == 'blockquote':
-            replacement = f"<blockquote>{content}</blockquote>"
-        else:
+def filter_entities(entities):
+    """Filter and keep only supported formatting entities"""
+    allowed_types = {
+        MessageEntity.BOLD, MessageEntity.ITALIC,
+        MessageEntity.CODE, MessageEntity.PRE,
+        MessageEntity.STRIKETHROUGH, MessageEntity.TEXT_LINK,
+        MessageEntity.UNDERLINE
+    }
+    return [e for e in entities if e.type in allowed_types] if entities else []
+
+def process_entities(original_entities, text):
+    """Process entities to match the final text length"""
+    processed = []
+    for entity in original_entities or []:
+        if entity.offset >= len(text):
             continue
-        
-        html = html[:start] + replacement + html[end:]
-    
-    return html
+            
+        max_length = len(text) - entity.offset
+        new_length = min(entity.length, max_length)
+        if new_length <= 0:
+            continue
 
-def process_content(original_text, entities, drive_links, replace_rules):
-    """Process content while preserving Telegram formatting and applying replacements"""
-    # Convert to HTML first to preserve Telegram formatting
-    html = convert_to_html(original_text, entities)
-    
-    # Apply replacement rules
-    for old_text, new_text in replace_rules:
-        # Replace in HTML while preserving tags
-        pattern = re.compile(re.escape(old_text), re.IGNORECASE)
-        html = pattern.sub(new_text, html)
-    
-    # Replace drive links
-    for old_url, new_url in drive_links:
-        # Replace in HTML while preserving tags
-        pattern = re.compile(re.escape(old_url), re.IGNORECASE)
-        html = pattern.sub(new_url, html)
-    
-    # Clear everything after the last drive link + short URL
-    if drive_links:
-        # Find the position of the last replacement
-        last_pos = 0
-        for old_url, new_url in drive_links:
-            pos = html.rfind(new_url)
-            if pos != -1 and pos > last_pos:
-                last_pos = pos + len(new_url)
-        
-        # Keep only up to the last replacement
-        html = html[:last_pos]
-    
-    return html.strip()
-
-async def robust_send(bot, send_method, *args, **kwargs):
-    """Helper function to send messages with retry logic"""
-    for attempt in range(MAX_RETRIES):
-        try:
-            return await send_method(*args, **kwargs)
-        except NetworkError as e:
-            if attempt == MAX_RETRIES - 1:
-                raise
-            await asyncio.sleep(RETRY_DELAY * (attempt + 1))
-        except TelegramError as e:
-            print(f"Telegram error: {str(e)}")
-            raise
+        if entity.type == MessageEntity.TEXT_LINK:
+            processed.append(MessageEntity(
+                type=entity.type,
+                offset=entity.offset,
+                length=new_length,
+                url=entity.url
+            ))
+        else:
+            processed.append(MessageEntity(
+                type=entity.type,
+                offset=entity.offset,
+                length=new_length
+            ))
+    return processed
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle incoming messages and process them"""
     message = update.message
     if not message or (message.text and message.text.startswith('/')):
         return
 
-    # Get the original text from either caption or message text
     original_text = message.caption or message.text or ''
-    entities = message.caption_entities or message.entities or []
+    original_entities = message.caption_entities if message.caption else message.entities
     drive_links = []
 
     try:
@@ -357,6 +321,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         replace_rules = initialize_replace_rules(drive_service)
 
         if original_text:
+            # Apply replacement rules
+            for old_text, new_text in replace_rules:
+                original_text = original_text.replace(old_text, new_text)
+
+            # Process drive links
             url_matches = list(re.finditer(
                 r'https?://drive\.google\.com/drive/folders/[\w-]+[^\s>]*',
                 original_text
@@ -374,133 +343,69 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         random_link = random.choice(SHORT_LINKS)
                         new_url = f'https://drive.google.com/drive/folders/{new_folder_id} {random_link}'
                         drive_links.append((url, new_url))
+                        original_text = original_text.replace(url, new_url)
                     except Exception as e:
-                        await robust_send(
-                            context.bot,
-                            message.reply_text,
-                            f"⚠️ Error processing {url}: {str(e)}"
-                        )
+                        await message.reply_text(f"⚠️ Error processing {url}: {str(e)}")
                         continue
 
-            # Process the text regardless of whether it's caption or regular text
-            final_text = process_content(original_text, entities, drive_links, replace_rules)
+            # Truncate text after last drive link
+            if drive_links:
+                last_pos = original_text.rfind(drive_links[-1][1]) + len(drive_links[-1][1])
+                final_text = original_text[:last_pos].strip()
+            else:
+                final_text = original_text
 
+            # Process entities for formatting
+            processed_entities = process_entities(original_entities, final_text)
+        else:
+            final_text = ''
+            processed_entities = []
+
+        # Prepare message arguments
         send_args = {
             'chat_id': TARGET_CHANNEL,
-            'parse_mode': ParseMode.HTML,
-            'disable_notification': True
+            'disable_notification': True,
+            'caption': final_text,
+            'caption_entities': processed_entities
         }
 
-        # Handle different message types
+        # Forward message with appropriate media type
         if message.photo:
-            await robust_send(
-                context.bot,
-                context.bot.send_photo,
+            await context.bot.send_photo(
                 photo=message.photo[-1].file_id,
-                caption=final_text,  # Always include the processed caption
                 **send_args
             )
         elif message.video:
-            await robust_send(
-                context.bot,
-                context.bot.send_video,
+            await context.bot.send_video(
                 video=message.video.file_id,
-                caption=final_text,  # Always include the processed caption
                 **send_args
             )
         elif message.document:
-            await robust_send(
-                context.bot,
-                context.bot.send_document,
+            await context.bot.send_document(
                 document=message.document.file_id,
-                caption=final_text,  # Always include the processed caption
                 **send_args
             )
         elif message.audio:
-            await robust_send(
-                context.bot,
-                context.bot.send_audio,
+            await context.bot.send_audio(
                 audio=message.audio.file_id,
-                caption=final_text,  # Always include the processed caption
                 **send_args
-            )
-        elif message.animation:
-            await robust_send(
-                context.bot,
-                context.bot.send_animation,
-                animation=message.animation.file_id,
-                caption=final_text,  # Always include the processed caption
-                **send_args
-            )
-        elif message.sticker:
-            await robust_send(
-                context.bot,
-                context.bot.send_sticker,
-                sticker=message.sticker.file_id,
-                **{k:v for k,v in send_args.items() if k != 'parse_mode'}
-            )
-        elif message.voice:
-            await robust_send(
-                context.bot,
-                context.bot.send_voice,
-                voice=message.voice.file_id,
-                caption=final_text,  # Always include the processed caption
-                **send_args
-            )
-        elif message.video_note:
-            await robust_send(
-                context.bot,
-                context.bot.send_video_note,
-                video_note=message.video_note.file_id,
-                **{k:v for k,v in send_args.items() if k != 'parse_mode'}
-            )
-        elif message.contact:
-            await robust_send(
-                context.bot,
-                context.bot.send_contact,
-                contact=message.contact,
-                **{k:v for k,v in send_args.items() if k != 'parse_mode'}
-            )
-        elif message.location:
-            await robust_send(
-                context.bot,
-                context.bot.send_location,
-                location=message.location,
-                **{k:v for k,v in send_args.items() if k != 'parse_mode'}
-            )
-        elif message.venue:
-            await robust_send(
-                context.bot,
-                context.bot.send_venue,
-                venue=message.venue,
-                **{k:v for k,v in send_args.items() if k != 'parse_mode'}
-            )
-        elif message.poll:
-            await robust_send(
-                context.bot,
-                context.bot.send_poll,
-                question=message.poll.question,
-                options=[option.text for option in message.poll.options],
-                **{k:v for k,v in send_args.items() if k != 'parse_mode'}
             )
         else:
-            if final_text:
-                await robust_send(
-                    context.bot,
-                    context.bot.send_message,
-                    text=final_text,
-                    **send_args
-                )
+            await context.bot.send_message(
+                text=final_text,
+                entities=processed_entities,
+                disable_notification=True,
+                chat_id=TARGET_CHANNEL
+            )
 
     except Exception as e:
-        await robust_send(
-            context.bot,
-            context.bot.send_message,
+        await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text=f"⚠️ Processing error: {str(e)[:200]}"
         )
 
 async def ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Ban a file or folder from being processed"""
     try:
         if not context.args:
             await update.message.reply_text("❌ Usage: /ban <filename_or_folder_or_drive_link>")
@@ -548,6 +453,7 @@ async def ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"⚠️ Ban failed: {str(e)}")
 
 async def unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Unban a file or folder"""
     try:
         if not context.args:
             await update.message.reply_text("❌ Usage: /unban <filename_or_folder_or_drive_link>")
@@ -595,37 +501,33 @@ async def unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"⚠️ Unban failed: {str(e)}")
 
 async def replace(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Add or update a text replacement rule"""
     try:
-        if not context.args:
-            await update.message.reply_text("❌ Usage: /replace [old text] to [new text]")
+        args_str = ' '.join(context.args).strip() if context.args else ''
+        if not args_str:
+            await update.message.reply_text("❌ Usage: /replace <old_text> to <new_text>")
             return
 
-        # Join all arguments and split on " to " (with spaces)
-        full_text = ' '.join(context.args)
-        if ' to ' not in full_text:
-            await update.message.reply_text("❌ Usage: /replace [old text] to [new text]")
+        split_index = args_str.rfind(' to ')
+        if split_index == -1:
+            await update.message.reply_text("❌ Invalid format. Use ' to ' to separate old and new text.")
             return
 
-        old_text, new_text = full_text.split(' to ', 1)
-        old_text = old_text.strip()
-        new_text = new_text.strip()
+        old_text = args_str[:split_index].strip()
+        new_text = args_str[split_index+4:].strip()
 
         if not old_text or not new_text:
-            await update.message.reply_text("❌ Both old and new text must be provided")
+            await update.message.reply_text("❌ Both old and new text must be provided.")
             return
 
         drive_service = get_drive_service()
         replace_rules = initialize_replace_rules(drive_service)
 
-        # Check if replacement rule already exists
         exists = any(old == old_text for old, new in replace_rules)
-        
         if exists:
-            # Update existing rule
             replace_rules = [(old, new_text if old == old_text else new) for old, new in replace_rules]
             response_text = f"✅ Updated replacement: '{old_text}' → '{new_text}'"
         else:
-            # Add new rule
             replace_rules.append((old_text, new_text))
             response_text = f"✅ Added replacement: '{old_text}' → '{new_text}'"
 
@@ -635,7 +537,45 @@ async def replace(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"⚠️ Replace failed: {str(e)}")
 
+async def replacex(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Remove a text replacement rule"""
+    try:
+        if not context.args:
+            await update.message.reply_text("❌ Usage: /replacex <old_text>")
+            return
+
+        old_text = ' '.join(context.args).strip()
+        if not old_text:
+            await update.message.reply_text("❌ Please provide the old text to remove.")
+            return
+
+        drive_service = get_drive_service()
+        replace_rules = initialize_replace_rules(drive_service)
+
+        new_rules = [(old, new) for old, new in replace_rules if old != old_text]
+        if len(new_rules) < len(replace_rules):
+            save_replace_rules(drive_service, new_rules)
+            await update.message.reply_text(f"✅ Removed replacement rule for: '{old_text}'")
+        else:
+            await update.message.reply_text(f"⚠️ No replacement rule found for: '{old_text}'")
+
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Replacex failed: {str(e)}")
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Send welcome message with bot instructions"""
+    await update.message.reply_text(
+        "🚀 TechZoneX Auto Forward Bot\n\n"
+        "Send any post with Google Drive links for processing!\n"
+        "Admins:\n"
+        "/ban <name_or_link> - Block files/folders\n"
+        "/unban <name_or_link> - Unblock files/folders\n"
+        "/replace <old_text> to <new_text> - Replace text in posts\n"
+        "/replacex <old_text> - Remove a replacement rule"
+    )
+
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle errors in the bot"""
     error = context.error
     tb_list = traceback.format_exception(type(error), error, error.__traceback__)
     tb_string = ''.join(tb_list)
@@ -643,47 +583,37 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         if update and update.effective_chat:
-            await robust_send(
-                context.bot,
-                context.bot.send_message,
+            await context.bot.send_message(
                 chat_id=update.effective_chat.id,
                 text="⚠️ An error occurred. Please check the format and try again."
             )
     except Exception as e:
         print(f"Error in error handler while sending message: {e}")
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🚀 TechZoneX Auto Forward Bot\n\n"
-        "Send any post with Google Drive links for processing!\n"
-        "Admins:\n"
-        "/ban <name_or_link> - Block files/folders\n"
-        "/unban <name_or_link> - Unblock files/folders\n"
-        "/replace [old text] to [new text] - Replace text in posts"
-    )
-
 def main():
-    """Run the bot."""
+    """Start the bot"""
     application = Application.builder().token(BOT_TOKEN).build()
     
-    # Register handlers
+    # Command handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("ban", ban))
     application.add_handler(CommandHandler("unban", unban))
     application.add_handler(CommandHandler("replace", replace))
+    application.add_handler(CommandHandler("replacex", replacex))
     
-    message_filter = (
+    # Message handler
+    application.add_handler(MessageHandler(
         filters.CAPTION | filters.TEXT | filters.PHOTO |
-        filters.VIDEO | filters.Document.ALL | filters.AUDIO |
-        filters.ANIMATION | filters.Sticker.ALL | filters.VOICE |
-        filters.VIDEO_NOTE | filters.CONTACT | filters.LOCATION |
-        filters.VENUE | filters.POLL
-    ) & ~filters.COMMAND
+        filters.VIDEO | filters.Document.ALL | filters.AUDIO &
+        ~filters.COMMAND,
+        handle_message
+    ))
     
-    application.add_handler(MessageHandler(message_filter, handle_message))
+    # Error handler
     application.add_error_handler(error_handler)
-
-    # Run the bot until the user presses Ctrl-C
+    
+    # Start polling
+    print("🤖 Bot is running...")
     application.run_polling()
 
 if __name__ == "__main__":
