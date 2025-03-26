@@ -278,11 +278,43 @@ def rename_video_files(service, folder_id):
         if not page_token:
             break
 
+def apply_text_replacements(text, replace_rules):
+    """Apply all text replacements from replace.txt"""
+    for old_text, new_text in replace_rules:
+        text = text.replace(old_text, new_text)
+    return text
+
+def adjust_entity_positions(original_text, modified_text, original_entities):
+    """Adjust entity positions after text replacements"""
+    adjusted_entities = []
+    for entity in original_entities:
+        try:
+            # Find original text segment
+            original_segment = original_text[entity.offset:entity.offset+entity.length]
+            
+            # Find new position in modified text
+            new_offset = modified_text.find(original_segment)
+            if new_offset != -1:
+                if entity.type == MessageEntity.TEXT_LINK:
+                    adjusted_entities.append(MessageEntity(
+                        type=entity.type,
+                        offset=new_offset,
+                        length=len(original_segment),
+                        url=entity.url
+                    ))
+                else:
+                    adjusted_entities.append(MessageEntity(
+                        type=entity.type,
+                        offset=new_offset,
+                        length=len(original_segment)
+                    ))
+        except Exception as e:
+            print(f"Skipping entity adjustment: {str(e)}")
+            continue
+    return adjusted_entities
+
 def validate_entity_positions(text, entities):
     """Ensure entities align with UTF-16 character boundaries"""
-    if not entities:
-        return []
-    
     valid_entities = []
     text_utf16 = text.encode('utf-16-le')
     
@@ -329,29 +361,8 @@ def filter_entities(entities):
     }
     return [e for e in entities if e.type in allowed_types] if entities else []
 
-def process_message_content(text, entities, replace_rules, drive_links):
-    """Process message content with proper entity handling"""
-    # Apply replacement rules
-    for old_text, new_text in replace_rules:
-        text = text.replace(old_text, new_text)
-    
-    # Apply drive link replacements
-    for old_url, new_url in drive_links:
-        text = text.replace(old_url, new_url)
-    
-    # Truncate after last drive link if any
-    if drive_links:
-        last_pos = text.rfind(drive_links[-1][1]) + len(drive_links[-1][1])
-        text = text[:last_pos].strip()
-    
-    # Process entities
-    filtered_entities = filter_entities(entities)
-    valid_entities = validate_entity_positions(text, filtered_entities)
-    
-    return text, valid_entities
-
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle incoming messages with safe entity processing"""
+    """Handle incoming messages with proper replacement and formatting order"""
     message = update.message
     if not message or (message.text and message.text.startswith('/')):
         return
@@ -365,46 +376,56 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         banned_items = initialize_banned_items(drive_service)
         replace_rules = initialize_replace_rules(drive_service)
 
-        if original_text:
-            # Process Google Drive links
-            url_matches = list(re.finditer(
-                r'https?://drive\.google\.com/drive/folders/[\w-]+[^\s>]*',
-                original_text
-            ))
+        # 1. Apply text replacements FIRST
+        replaced_text = apply_text_replacements(original_text, replace_rules)
+        
+        # 2. Process Google Drive links AFTER replacements
+        url_matches = list(re.finditer(
+            r'https?://drive\.google\.com/drive/folders/[\w-]+[^\s>]*',
+            replaced_text
+        ))
+        
+        for match in url_matches:
+            url = match.group()
+            folder_id = extract_folder_id(url)
             
-            for match in url_matches:
-                url = match.group()
-                folder_id = extract_folder_id(url)
-                
-                if folder_id:
-                    try:
-                        new_folder_id = await asyncio.get_event_loop().run_in_executor(
-                            None, copy_folder, drive_service, folder_id, banned_items
-                        )
-                        random_link = random.choice(SHORT_LINKS)
-                        new_url = f'https://drive.google.com/drive/folders/{new_folder_id} {random_link}'
-                        drive_links.append((url, new_url))
-                    except Exception as e:
-                        await message.reply_text(f"⚠️ Error processing {url}: {str(e)}")
-                        continue
+            if folder_id:
+                try:
+                    new_folder_id = await asyncio.get_event_loop().run_in_executor(
+                        None, copy_folder, drive_service, folder_id, banned_items
+                    )
+                    random_link = random.choice(SHORT_LINKS)
+                    new_url = f'https://drive.google.com/drive/folders/{new_folder_id} {random_link}'
+                    drive_links.append((url, new_url))
+                    replaced_text = replaced_text.replace(url, new_url)
+                except Exception as e:
+                    await message.reply_text(f"⚠️ Error processing {url}: {str(e)}")
+                    continue
 
-            # Process message content and entities
-            final_text, processed_entities = process_message_content(
-                original_text,
-                original_entities,
-                replace_rules,
-                drive_links
-            )
+        # 3. Adjust entities after replacements
+        adjusted_entities = adjust_entity_positions(
+            original_text,
+            replaced_text,
+            original_entities
+        )
+        
+        # 4. Filter and validate entities
+        filtered_entities = filter_entities(adjusted_entities)
+        valid_entities = validate_entity_positions(replaced_text, filtered_entities)
+        
+        # 5. Truncate after last drive link if any
+        if drive_links:
+            last_pos = replaced_text.rfind(drive_links[-1][1]) + len(drive_links[-1][1])
+            final_text = replaced_text[:last_pos].strip()
         else:
-            final_text = ''
-            processed_entities = []
+            final_text = replaced_text
 
         # Prepare message arguments
         send_args = {
             'chat_id': TARGET_CHANNEL,
             'disable_notification': True,
             'caption': final_text,
-            'caption_entities': processed_entities
+            'caption_entities': valid_entities
         }
 
         # Forward message with appropriate media type
@@ -431,7 +452,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await context.bot.send_message(
                 text=final_text,
-                entities=processed_entities,
+                entities=valid_entities,
                 disable_notification=True,
                 chat_id=TARGET_CHANNEL
             )
@@ -637,7 +658,7 @@ def main():
     application.add_error_handler(error_handler)
     
     # Start polling
-    print("🤖 Bot is running with safe entity processing...")
+    print("🤖 Bot is running with proper replacement ordering...")
     application.run_polling()
 
 if __name__ == "__main__":
