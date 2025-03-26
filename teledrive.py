@@ -11,6 +11,7 @@ from google.auth.transport.requests import Request
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from telegram.constants import ParseMode
+from telegram.error import TelegramError, NetworkError
 
 # Configuration
 BOT_TOKEN = "7846379611:AAGzu4KM-Aq699Q8aHNt29t0YbTnDKbkXbI"
@@ -22,6 +23,8 @@ SHORT_LINKS = ["rb.gy/cd8ugy", "bit.ly/3UcvhlA", "t.ly/CfcVB", "cutt.ly/Kee3oiLO
 TARGET_CHANNEL = "@techworld196"
 BANNED_FILE_ID = '1B5GAAtzpuH_XNGyUiJIMDlB9hJfxkg8r'
 REPLACE_FILE_ID = '1HK79HS_a3lVZd30HEytp0flPqa1cIVn7'
+MAX_RETRIES = 3
+RETRY_DELAY = 5
 
 # Initialize banned items from Google Drive
 def initialize_banned_items(service):
@@ -257,10 +260,7 @@ def rename_video_files(service, folder_id):
             break
 
 def convert_to_html(text, entities):
-    """
-    Convert message text with Telegram entities to HTML while preserving only Telegram formatting
-    and ignoring font styles.
-    """
+    """Convert message text with Telegram entities to HTML while preserving only Telegram formatting"""
     html = text
     # Process entities in reverse order to avoid offset issues
     for entity in sorted(
@@ -291,7 +291,6 @@ def convert_to_html(text, entities):
         elif entity.type == 'blockquote':
             replacement = f"<blockquote>{content}</blockquote>"
         else:
-            # Skip other entity types (like custom emoji, font changes, etc.)
             continue
         
         html = html[:start] + replacement + html[end:]
@@ -299,9 +298,7 @@ def convert_to_html(text, entities):
     return html
 
 def process_content(original_text, entities, drive_links, replace_rules):
-    """
-    Process content while preserving Telegram formatting and applying replacements
-    """
+    """Process content while preserving Telegram formatting and applying replacements"""
     # Convert to HTML first to preserve Telegram formatting
     html = convert_to_html(original_text, entities)
     
@@ -331,11 +328,25 @@ def process_content(original_text, entities, drive_links, replace_rules):
     
     return html.strip()
 
+async def robust_send(bot, send_method, *args, **kwargs):
+    """Helper function to send messages with retry logic"""
+    for attempt in range(MAX_RETRIES):
+        try:
+            return await send_method(*args, **kwargs)
+        except NetworkError as e:
+            if attempt == MAX_RETRIES - 1:
+                raise
+            await asyncio.sleep(RETRY_DELAY * (attempt + 1))
+        except TelegramError as e:
+            print(f"Telegram error: {str(e)}")
+            raise
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     if not message or (message.text and message.text.startswith('/')):
         return
 
+    # Get the original text from either caption or message text
     original_text = message.caption or message.text or ''
     entities = message.caption_entities or message.entities or []
     drive_links = []
@@ -364,9 +375,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         new_url = f'https://drive.google.com/drive/folders/{new_folder_id} {random_link}'
                         drive_links.append((url, new_url))
                     except Exception as e:
-                        await message.reply_text(f"⚠️ Error processing {url}: {str(e)}")
+                        await robust_send(
+                            context.bot,
+                            message.reply_text,
+                            f"⚠️ Error processing {url}: {str(e)}"
+                        )
                         continue
 
+            # Process the text regardless of whether it's caption or regular text
             final_text = process_content(original_text, entities, drive_links, replace_rules)
 
         send_args = {
@@ -375,82 +391,111 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'disable_notification': True
         }
 
+        # Handle different message types
         if message.photo:
-            await context.bot.send_photo(
+            await robust_send(
+                context.bot,
+                context.bot.send_photo,
                 photo=message.photo[-1].file_id,
-                caption=final_text if final_text else None,
+                caption=final_text,  # Always include the processed caption
                 **send_args
             )
         elif message.video:
-            await context.bot.send_video(
+            await robust_send(
+                context.bot,
+                context.bot.send_video,
                 video=message.video.file_id,
-                caption=final_text if final_text else None,
+                caption=final_text,  # Always include the processed caption
                 **send_args
             )
         elif message.document:
-            await context.bot.send_document(
+            await robust_send(
+                context.bot,
+                context.bot.send_document,
                 document=message.document.file_id,
-                caption=final_text if final_text else None,
+                caption=final_text,  # Always include the processed caption
                 **send_args
             )
         elif message.audio:
-            await context.bot.send_audio(
+            await robust_send(
+                context.bot,
+                context.bot.send_audio,
                 audio=message.audio.file_id,
-                caption=final_text if final_text else None,
+                caption=final_text,  # Always include the processed caption
                 **send_args
             )
         elif message.animation:
-            await context.bot.send_animation(
+            await robust_send(
+                context.bot,
+                context.bot.send_animation,
                 animation=message.animation.file_id,
-                caption=final_text if final_text else None,
+                caption=final_text,  # Always include the processed caption
                 **send_args
             )
         elif message.sticker:
-            await context.bot.send_sticker(
+            await robust_send(
+                context.bot,
+                context.bot.send_sticker,
                 sticker=message.sticker.file_id,
                 **{k:v for k,v in send_args.items() if k != 'parse_mode'}
             )
         elif message.voice:
-            await context.bot.send_voice(
+            await robust_send(
+                context.bot,
+                context.bot.send_voice,
                 voice=message.voice.file_id,
-                caption=final_text if final_text else None,
+                caption=final_text,  # Always include the processed caption
                 **send_args
             )
         elif message.video_note:
-            await context.bot.send_video_note(
+            await robust_send(
+                context.bot,
+                context.bot.send_video_note,
                 video_note=message.video_note.file_id,
                 **{k:v for k,v in send_args.items() if k != 'parse_mode'}
             )
         elif message.contact:
-            await context.bot.send_contact(
+            await robust_send(
+                context.bot,
+                context.bot.send_contact,
                 contact=message.contact,
                 **{k:v for k,v in send_args.items() if k != 'parse_mode'}
             )
         elif message.location:
-            await context.bot.send_location(
+            await robust_send(
+                context.bot,
+                context.bot.send_location,
                 location=message.location,
                 **{k:v for k,v in send_args.items() if k != 'parse_mode'}
             )
         elif message.venue:
-            await context.bot.send_venue(
+            await robust_send(
+                context.bot,
+                context.bot.send_venue,
                 venue=message.venue,
                 **{k:v for k,v in send_args.items() if k != 'parse_mode'}
             )
         elif message.poll:
-            await context.bot.send_poll(
+            await robust_send(
+                context.bot,
+                context.bot.send_poll,
                 question=message.poll.question,
                 options=[option.text for option in message.poll.options],
                 **{k:v for k,v in send_args.items() if k != 'parse_mode'}
             )
         else:
             if final_text:
-                await context.bot.send_message(
+                await robust_send(
+                    context.bot,
+                    context.bot.send_message,
                     text=final_text,
                     **send_args
                 )
 
     except Exception as e:
-        await context.bot.send_message(
+        await robust_send(
+            context.bot,
+            context.bot.send_message,
             chat_id=update.effective_chat.id,
             text=f"⚠️ Processing error: {str(e)[:200]}"
         )
@@ -598,7 +643,9 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         if update and update.effective_chat:
-            await context.bot.send_message(
+            await robust_send(
+                context.bot,
+                context.bot.send_message,
                 chat_id=update.effective_chat.id,
                 text="⚠️ An error occurred. Please check the format and try again."
             )
@@ -635,7 +682,20 @@ def main():
     application.add_handler(MessageHandler(message_filter, handle_message))
     
     application.add_error_handler(error_handler)
-    application.run_polling()
+    
+    # Add retry logic for polling
+    async def run_with_retries():
+        while True:
+            try:
+                await application.run_polling()
+            except NetworkError as e:
+                print(f"Network error: {e}. Retrying in {RETRY_DELAY} seconds...")
+                await asyncio.sleep(RETRY_DELAY)
+            except Exception as e:
+                print(f"Fatal error: {e}")
+                raise
+    
+    asyncio.run(run_with_retries())
 
 if __name__ == "__main__":
     main()
