@@ -9,7 +9,7 @@ from telegram import Update, MessageEntity
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
+from googleapiclient.http import MediaIoBaseUpload
 from google.auth.transport.requests import Request
 from googleapiclient.errors import HttpError
 
@@ -45,7 +45,8 @@ def get_drive_service():
 def initialize_banned_items(service):
     """Load banned items list from Google Drive"""
     try:
-        banned_file = service.files().get_media(fileId=BANNED_FILE_ID).execute()
+        request = service.files().get_media(fileId=BANNED_FILE_ID)
+        banned_file = request.execute()
         return banned_file.decode('utf-8').splitlines()
     except Exception as e:
         print(f"Error loading banned items: {str(e)}")
@@ -63,9 +64,9 @@ def save_banned_items(service, banned_items):
 def extract_folder_id(url):
     """Extract folder ID from Google Drive URL with multiple pattern support"""
     patterns = [
-        r'/folders/([a-zA-Z0-9-_]+)',  # Standard /folders/ pattern
-        r'[?&]id=([a-zA-Z0-9-_]+)',    # ?id= or &id= pattern
-        r'/folderview[?&]id=([a-zA-Z0-9-_]+)'  # /folderview?id= pattern
+        r'/folders/([a-zA-Z0-9-_]+)',        # Standard /folders/ pattern
+        r'[?&]id=([a-zA-Z0-9-_]+)',          # ?id= or &id= pattern
+        r'/folderview[?&]id=([a-zA-Z0-9-_]+)' # /folderview?id= pattern
     ]
     
     for pattern in patterns:
@@ -88,7 +89,7 @@ def execute_with_retry(func, *args, **kwargs):
     last_exception = None
     for attempt in range(MAX_RETRIES):
         try:
-            return func(*args, **kwargs)
+            return func(*args, **kwargs).execute()
         except HttpError as e:
             if e.resp.status in [500, 502, 503, 504] or 'timed out' in str(e).lower():
                 last_exception = e
@@ -110,10 +111,10 @@ def copy_folder(service, folder_id, banned_items):
     """Copy a folder and its contents with retry mechanism"""
     try:
         folder = execute_with_retry(service.files().get, fileId=folder_id, fields='name')
-        new_folder = execute_with_retry(service.files().create, body={
+        new_folder = service.files().create(body={
             'name': folder['name'],
             'mimeType': 'application/vnd.google-apps.folder'
-        })
+        }).execute()
         new_folder_id = new_folder['id']
 
         copy_folder_contents(service, folder_id, new_folder_id, banned_items)
@@ -146,8 +147,7 @@ def get_all_subfolders_recursive(service, folder_id):
                 response = execute_with_retry(service.files().list,
                     q=f"'{current_folder}' in parents and mimeType='application/vnd.google-apps.folder'",
                     fields='nextPageToken, files(id)',
-                    pageSize=CHUNK_SIZE,
-                    pageToken=page_token
+                    pageSize=CHUNK_SIZE
                 )
                 
                 for folder in response.get('files', []):
@@ -225,17 +225,17 @@ def copy_item_to_folder(service, item, dest_folder_id, banned_items, overwrite=F
                 execute_with_retry(service.files().delete, fileId=file['id'])
 
         if item['mimeType'] == 'application/vnd.google-apps.folder':
-            new_folder = execute_with_retry(service.files().create, body={
+            new_folder = service.files().create(body={
                 'name': item['name'],
                 'parents': [dest_folder_id],
                 'mimeType': 'application/vnd.google-apps.folder'
-            })
+            }).execute()
             copy_bonus_content(service, item['id'], new_folder['id'], banned_items, overwrite)
         else:
-            execute_with_retry(service.files().copy,
+            service.files().copy(
                 fileId=item['id'],
                 body={'parents': [dest_folder_id]}
-            )
+            ).execute()
     except Exception as e:
         print(f"Error copying {item['name']}: {str(e)}")
 
@@ -256,17 +256,17 @@ def copy_folder_contents(service, source_id, dest_id, banned_items):
                     continue
                     
                 if item['mimeType'] == 'application/vnd.google-apps.folder':
-                    new_subfolder = execute_with_retry(service.files().create, body={
+                    new_subfolder = service.files().create(body={
                         'name': item['name'],
                         'parents': [dest_id],
                         'mimeType': 'application/vnd.google-apps.folder'
-                    })
+                    }).execute()
                     copy_folder_contents(service, item['id'], new_subfolder['id'], banned_items)
                 else:
-                    execute_with_retry(service.files().copy,
+                    service.files().copy(
                         fileId=item['id'],
                         body={'parents': [dest_id]}
-                    )
+                    ).execute()
             
             page_token = response.get('nextPageToken')
             if not page_token:
@@ -304,10 +304,10 @@ def rename_files_and_folders(service, folder_id):
                         new_name = current_name.replace('.mp4', ' (Telegram@TechZoneX).mp4')
                     
                     if new_name != current_name:
-                        execute_with_retry(service.files().update,
+                        service.files().update(
                             fileId=item['id'],
                             body={'name': new_name}
-                        )
+                        ).execute()
                 except Exception as e:
                     print(f"Error renaming {item['name']}: {str(e)}")
                     continue
