@@ -4,12 +4,14 @@ import io
 import random
 import asyncio
 import traceback
+import time
 from telegram import Update, MessageEntity
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
 from google.auth.transport.requests import Request
+from googleapiclient.errors import HttpError
 
 # Configuration
 BOT_TOKEN = "7846379611:AAGzu4KM-Aq699Q8aHNt29t0YbTnDKbkXbI"
@@ -20,6 +22,11 @@ PHASE3_SOURCE = '12V7EnRIYcSgEtt0PR5fhV8cO22nzYuiv'
 SHORT_LINKS = ["rb.gy/cd8ugy", "bit.ly/3UcvhlA", "t.ly/CfcVB", "cutt.ly/Kee3oiLO"]
 TARGET_CHANNEL = "@techworld196"
 BANNED_FILE_ID = '1B5GAAtzpuH_XNGyUiJIMDlB9hJfxkg8r'
+
+# Constants for retry mechanism
+MAX_RETRIES = 3
+RETRY_DELAY = 10  # seconds
+CHUNK_SIZE = 20  # Number of files to process at once
 
 def get_drive_service():
     """Initialize and return Google Drive service"""
@@ -54,9 +61,18 @@ def save_banned_items(service, banned_items):
         print(f"Error saving banned items: {str(e)}")
 
 def extract_folder_id(url):
-    """Extract folder ID from Google Drive URL"""
-    match = re.search(r'/folders/([a-zA-Z0-9-_]+)', url)
-    return match.group(1) if match else None
+    """Extract folder ID from Google Drive URL with multiple pattern support"""
+    patterns = [
+        r'/folders/([a-zA-Z0-9-_]+)',  # Standard /folders/ pattern
+        r'[?&]id=([a-zA-Z0-9-_]+)',    # ?id= or &id= pattern
+        r'/folderview[?&]id=([a-zA-Z0-9-_]+)'  # /folderview?id= pattern
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    return None
 
 def extract_file_id(url):
     """Extract file ID from Google Drive URL"""
@@ -67,14 +83,37 @@ def should_skip_item(name, banned_items):
     """Check if item should be skipped based on banned list"""
     return name in banned_items
 
+def execute_with_retry(func, *args, **kwargs):
+    """Execute a function with retry mechanism"""
+    last_exception = None
+    for attempt in range(MAX_RETRIES):
+        try:
+            return func(*args, **kwargs)
+        except HttpError as e:
+            if e.resp.status in [500, 502, 503, 504] or 'timed out' in str(e).lower():
+                last_exception = e
+                print(f"Attempt {attempt + 1} failed, retrying in {RETRY_DELAY} seconds...")
+                time.sleep(RETRY_DELAY)
+                continue
+            raise
+        except Exception as e:
+            if 'timed out' in str(e).lower() and attempt < MAX_RETRIES - 1:
+                last_exception = e
+                print(f"Attempt {attempt + 1} failed, retrying in {RETRY_DELAY} seconds...")
+                time.sleep(RETRY_DELAY)
+                continue
+            raise
+    
+    raise Exception(f"Operation failed after {MAX_RETRIES} attempts. Last error: {str(last_exception)}")
+
 def copy_folder(service, folder_id, banned_items):
-    """Copy a folder and its contents"""
+    """Copy a folder and its contents with retry mechanism"""
     try:
-        folder = service.files().get(fileId=folder_id, fields='name').execute()
-        new_folder = service.files().create(body={
+        folder = execute_with_retry(service.files().get, fileId=folder_id, fields='name')
+        new_folder = execute_with_retry(service.files().create, body={
             'name': folder['name'],
             'mimeType': 'application/vnd.google-apps.folder'
-        }).execute()
+        })
         new_folder_id = new_folder['id']
 
         copy_folder_contents(service, folder_id, new_folder_id, banned_items)
@@ -94,7 +133,7 @@ def copy_folder(service, folder_id, banned_items):
         raise Exception(f"Copy failed: {str(e)}")
 
 def get_all_subfolders_recursive(service, folder_id):
-    """Get all subfolder IDs recursively"""
+    """Get all subfolder IDs recursively with chunked processing"""
     subfolders = []
     queue = [folder_id]
     
@@ -103,156 +142,181 @@ def get_all_subfolders_recursive(service, folder_id):
         page_token = None
         
         while True:
-            response = service.files().list(
-                q=f"'{current_folder}' in parents and mimeType='application/vnd.google-apps.folder'",
-                fields='nextPageToken, files(id)',
-                pageToken=page_token
-            ).execute()
-            
-            for folder in response.get('files', []):
-                subfolders.append(folder['id'])
-                queue.append(folder['id'])
-            
-            page_token = response.get('nextPageToken')
-            if not page_token:
+            try:
+                response = execute_with_retry(service.files().list,
+                    q=f"'{current_folder}' in parents and mimeType='application/vnd.google-apps.folder'",
+                    fields='nextPageToken, files(id)',
+                    pageSize=CHUNK_SIZE,
+                    pageToken=page_token
+                )
+                
+                for folder in response.get('files', []):
+                    subfolders.append(folder['id'])
+                    queue.append(folder['id'])
+                
+                page_token = response.get('nextPageToken')
+                if not page_token:
+                    break
+            except Exception as e:
+                print(f"Error getting subfolders: {str(e)}")
                 break
     
     return subfolders
 
 def copy_files_only(service, source_id, dest_id, banned_items, overwrite=False):
-    """Copy files from source to destination"""
+    """Copy files from source to destination with chunked processing"""
     page_token = None
     while True:
-        response = service.files().list(
-            q=f"'{source_id}' in parents",
-            fields='nextPageToken, files(id, name, mimeType)',
-            pageToken=page_token
-        ).execute()
-        
-        for item in response.get('files', []):
-            if should_skip_item(item['name'], banned_items):
-                continue
-            if item['mimeType'] != 'application/vnd.google-apps.folder':
-                copy_item_to_folder(service, item, dest_id, banned_items, overwrite)
-        
-        page_token = response.get('nextPageToken')
-        if not page_token:
+        try:
+            response = execute_with_retry(service.files().list,
+                q=f"'{source_id}' in parents",
+                fields='nextPageToken, files(id, name, mimeType)',
+                pageSize=CHUNK_SIZE,
+                pageToken=page_token
+            )
+            
+            for item in response.get('files', []):
+                if should_skip_item(item['name'], banned_items):
+                    continue
+                if item['mimeType'] != 'application/vnd.google-apps.folder':
+                    copy_item_to_folder(service, item, dest_id, banned_items, overwrite)
+            
+            page_token = response.get('nextPageToken')
+            if not page_token:
+                break
+        except Exception as e:
+            print(f"Error copying files: {str(e)}")
             break
 
 def copy_bonus_content(service, source_id, dest_id, banned_items, overwrite=False):
-    """Copy bonus content to destination"""
+    """Copy bonus content to destination with chunked processing"""
     page_token = None
     while True:
-        response = service.files().list(
-            q=f"'{source_id}' in parents",
-            fields='nextPageToken, files(id, name, mimeType)',
-            pageToken=page_token
-        ).execute()
-        
-        for item in response.get('files', []):
-            if should_skip_item(item['name'], banned_items):
-                continue
-            copy_item_to_folder(service, item, dest_id, banned_items, overwrite)
-        
-        page_token = response.get('nextPageToken')
-        if not page_token:
+        try:
+            response = execute_with_retry(service.files().list,
+                q=f"'{source_id}' in parents",
+                fields='nextPageToken, files(id, name, mimeType)',
+                pageSize=CHUNK_SIZE,
+                pageToken=page_token
+            )
+            
+            for item in response.get('files', []):
+                if should_skip_item(item['name'], banned_items):
+                    continue
+                copy_item_to_folder(service, item, dest_id, banned_items, overwrite)
+            
+            page_token = response.get('nextPageToken')
+            if not page_token:
+                break
+        except Exception as e:
+            print(f"Error copying bonus content: {str(e)}")
             break
 
 def copy_item_to_folder(service, item, dest_folder_id, banned_items, overwrite=False):
-    """Copy individual item to destination folder"""
+    """Copy individual item to destination folder with retry"""
     try:
         if overwrite:
-            existing = service.files().list(
+            existing = execute_with_retry(service.files().list,
                 q=f"name='{item['name']}' and '{dest_folder_id}' in parents",
                 fields='files(id)'
-            ).execute().get('files', [])
+            ).get('files', [])
             
             for file in existing:
-                service.files().delete(fileId=file['id']).execute()
+                execute_with_retry(service.files().delete, fileId=file['id'])
 
         if item['mimeType'] == 'application/vnd.google-apps.folder':
-            new_folder = service.files().create(body={
+            new_folder = execute_with_retry(service.files().create, body={
                 'name': item['name'],
                 'parents': [dest_folder_id],
                 'mimeType': 'application/vnd.google-apps.folder'
-            }).execute()
+            })
             copy_bonus_content(service, item['id'], new_folder['id'], banned_items, overwrite)
         else:
-            service.files().copy(
+            execute_with_retry(service.files().copy,
                 fileId=item['id'],
                 body={'parents': [dest_folder_id]}
-            ).execute()
+            )
     except Exception as e:
         print(f"Error copying {item['name']}: {str(e)}")
 
 def copy_folder_contents(service, source_id, dest_id, banned_items):
-    """Copy all contents from source to destination folder"""
+    """Copy all contents from source to destination folder with chunked processing"""
     page_token = None
     while True:
-        response = service.files().list(
-            q=f"'{source_id}' in parents",
-            fields='nextPageToken, files(id, name, mimeType)',
-            pageToken=page_token
-        ).execute()
-        
-        for item in response.get('files', []):
-            if should_skip_item(item['name'], banned_items):
-                continue
-                
-            if item['mimeType'] == 'application/vnd.google-apps.folder':
-                new_subfolder = service.files().create(body={
-                    'name': item['name'],
-                    'parents': [dest_id],
-                    'mimeType': 'application/vnd.google-apps.folder'
-                }).execute()
-                copy_folder_contents(service, item['id'], new_subfolder['id'], banned_items)
-            else:
-                service.files().copy(
-                    fileId=item['id'],
-                    body={'parents': [dest_id]}
-                ).execute()
-        
-        page_token = response.get('nextPageToken')
-        if not page_token:
+        try:
+            response = execute_with_retry(service.files().list,
+                q=f"'{source_id}' in parents",
+                fields='nextPageToken, files(id, name, mimeType)',
+                pageSize=CHUNK_SIZE,
+                pageToken=page_token
+            )
+            
+            for item in response.get('files', []):
+                if should_skip_item(item['name'], banned_items):
+                    continue
+                    
+                if item['mimeType'] == 'application/vnd.google-apps.folder':
+                    new_subfolder = execute_with_retry(service.files().create, body={
+                        'name': item['name'],
+                        'parents': [dest_id],
+                        'mimeType': 'application/vnd.google-apps.folder'
+                    })
+                    copy_folder_contents(service, item['id'], new_subfolder['id'], banned_items)
+                else:
+                    execute_with_retry(service.files().copy,
+                        fileId=item['id'],
+                        body={'parents': [dest_id]}
+                    )
+            
+            page_token = response.get('nextPageToken')
+            if not page_token:
+                break
+        except Exception as e:
+            print(f"Error copying folder contents: {str(e)}")
             break
 
 def rename_files_and_folders(service, folder_id):
-    """Rename files and folders with both @mentions and .mp4 patterns"""
+    """Rename files and folders with both @mentions and .mp4 patterns with chunked processing"""
     page_token = None
     while True:
-        response = service.files().list(
-            q=f"'{folder_id}' in parents",
-            fields='nextPageToken, files(id, name, mimeType)',
-            pageToken=page_token
-        ).execute()
-        
-        for item in response.get('files', []):
-            try:
-                current_name = item['name']
-                new_name = current_name
-                
-                # First check for @[any text] pattern
-                at_pattern = re.compile(r'@\w+')
-                at_match = at_pattern.search(current_name)
-                
-                if at_match:
-                    # Replace any @mention with @TechZoneX
-                    new_name = at_pattern.sub('@TechZoneX', current_name)
-                elif item['mimeType'] == 'video/mp4' and current_name.endswith('.mp4'):
-                    # Only add watermark if not an @mention file and is mp4
-                    new_name = current_name.replace('.mp4', ' (Telegram@TechZoneX).mp4')
-                
-                if new_name != current_name:
-                    service.files().update(
-                        fileId=item['id'],
-                        body={'name': new_name}
-                    ).execute()
-            except Exception as e:
-                print(f"Error renaming {item['name']}: {str(e)}")
-                continue
-        
-        page_token = response.get('nextPageToken')
-        if not page_token:
+        try:
+            response = execute_with_retry(service.files().list,
+                q=f"'{folder_id}' in parents",
+                fields='nextPageToken, files(id, name, mimeType)',
+                pageSize=CHUNK_SIZE,
+                pageToken=page_token
+            )
+            
+            for item in response.get('files', []):
+                try:
+                    current_name = item['name']
+                    new_name = current_name
+                    
+                    # First check for @[any text] pattern
+                    at_pattern = re.compile(r'@\w+')
+                    at_match = at_pattern.search(current_name)
+                    
+                    if at_match:
+                        # Replace any @mention with @TechZoneX
+                        new_name = at_pattern.sub('@TechZoneX', current_name)
+                    elif item['mimeType'] == 'video/mp4' and current_name.endswith('.mp4'):
+                        # Only add watermark if not an @mention file and is mp4
+                        new_name = current_name.replace('.mp4', ' (Telegram@TechZoneX).mp4')
+                    
+                    if new_name != current_name:
+                        execute_with_retry(service.files().update,
+                            fileId=item['id'],
+                            body={'name': new_name}
+                        )
+                except Exception as e:
+                    print(f"Error renaming {item['name']}: {str(e)}")
+                    continue
+            
+            page_token = response.get('nextPageToken')
+            if not page_token:
+                break
+        except Exception as e:
+            print(f"Error listing files for renaming: {str(e)}")
             break
 
 def validate_entity_positions(text, entities):
@@ -321,9 +385,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         banned_items = initialize_banned_items(drive_service)
 
         if original_text:
-            # Process Google Drive links
+            # Process Google Drive links with multiple pattern support
             url_matches = list(re.finditer(
-                r'https?://drive\.google\.com/drive/folders/[\w-]+[^\s>]*',
+                r'https?://(?:drive\.google\.com/(?:drive/folders/|folderview\?id=|.*[?&]id=)|.*\.google\.com/open\?id=)[\w-]+[^\s>]*',
                 original_text
             ))
             
@@ -424,14 +488,14 @@ async def ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if file_id:
             try:
-                file_info = drive_service.files().get(fileId=file_id, fields='name').execute()
+                file_info = execute_with_retry(drive_service.files().get, fileId=file_id, fields='name')
                 item_name = file_info['name']
             except Exception as e:
                 await update.message.reply_text(f"⚠️ Could not fetch file info: {str(e)}")
                 return
         elif folder_id:
             try:
-                folder_info = drive_service.files().get(fileId=folder_id, fields='name').execute()
+                folder_info = execute_with_retry(drive_service.files().get, fileId=folder_id, fields='name')
                 item_name = folder_info['name']
             except Exception as e:
                 await update.message.reply_text(f"⚠️ Could not fetch folder info: {str(e)}")
@@ -472,14 +536,14 @@ async def unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if file_id:
             try:
-                file_info = drive_service.files().get(fileId=file_id, fields='name').execute()
+                file_info = execute_with_retry(drive_service.files().get, fileId=file_id, fields='name')
                 item_name = file_info['name']
             except Exception as e:
                 await update.message.reply_text(f"⚠️ Could not fetch file info: {str(e)}")
                 return
         elif folder_id:
             try:
-                folder_info = drive_service.files().get(fileId=folder_id, fields='name').execute()
+                folder_info = execute_with_retry(drive_service.files().get, fileId=folder_id, fields='name')
                 item_name = folder_info['name']
             except Exception as e:
                 await update.message.reply_text(f"⚠️ Could not fetch folder info: {str(e)}")
