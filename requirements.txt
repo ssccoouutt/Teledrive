@@ -1,4 +1,5 @@
 google-auth>=2.3.3
+google-auth-oauthlib
 google-api-python-client>=2.65.0
 python-telegram-bot==20.0
 aiohttp>=3.8.0
