@@ -12,6 +12,7 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 from google.auth.transport.requests import Request
 from googleapiclient.errors import HttpError
+from google_auth_oauthlib.flow import InstalledAppFlow
 
 # Configuration
 BOT_TOKEN = "7846379611:AAGzu4KM-Aq699Q8aHNt29t0YbTnDKbkXbI"
@@ -37,7 +38,13 @@ def get_drive_service():
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
         else:
-            raise Exception('No valid credentials found.')
+            flow = InstalledAppFlow.from_client_secrets_file(
+                CREDENTIALS_PATH,
+                scopes=['https://www.googleapis.com/auth/drive'],
+                redirect_uri='urn:ietf:wg:oauth:2.0:oob'
+            )
+            auth_url, _ = flow.authorization_url(prompt='consent')
+            raise Exception(f'Authorization required. Please visit this URL: {auth_url}\nThen send the authorization code with /auth command')
         with open(TOKEN_PATH, 'w') as token:
             token.write(creds.to_json())
     return build('drive', 'v3', credentials=creds)
@@ -465,6 +472,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text=f"⚠️ Processing error: {str(e)[:200]}"
         )
 
+async def auth(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle authorization code"""
+    if not context.args:
+        await update.message.reply_text("❌ Please provide the authorization code")
+        return
+    
+    code = ' '.join(context.args)
+    try:
+        flow = InstalledAppFlow.from_client_secrets_file(
+            CREDENTIALS_PATH,
+            scopes=['https://www.googleapis.com/auth/drive'],
+            redirect_uri='urn:ietf:wg:oauth:2.0:oob'
+        )
+        flow.fetch_token(code=code)
+        creds = flow.credentials
+        
+        with open(TOKEN_PATH, 'w') as token:
+            token.write(creds.to_json())
+        
+        await update.message.reply_text("✅ Authorization successful! You can now use the bot.")
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Authorization failed: {str(e)}")
+
 async def ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Ban a file or folder from being processed"""
     try:
@@ -568,7 +598,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Send any post with Google Drive links for processing!\n"
         "Admins:\n"
         "/ban <name_or_link> - Block files/folders\n"
-        "/unban <name_or_link> - Unblock files/folders"
+        "/unban <name_or_link> - Unblock files/folders\n"
+        "/auth <code> - Authorize Google Drive"
     )
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -595,6 +626,7 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("ban", ban))
     application.add_handler(CommandHandler("unban", unban))
+    application.add_handler(CommandHandler("auth", auth))
     
     # Message handler
     application.add_handler(MessageHandler(
@@ -608,7 +640,7 @@ def main():
     application.add_error_handler(error_handler)
     
     # Start polling
-    print("🤖 Bot is running with enhanced renaming features...")
+    print("🤖 Bot is running with enhanced authentication flow...")
     application.run_polling()
 
 if __name__ == "__main__":
