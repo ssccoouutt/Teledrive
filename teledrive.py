@@ -38,8 +38,8 @@ pending_authorizations = {}
 async def health_check(request):
     return web.Response(text="🤖 Bot is running")
 
-async def start_webserver():
-    """Run the health check server indefinitely"""
+async def run_webserver():
+    """Run health check server in separate thread"""
     app = web.Application()
     app.router.add_get('/', health_check)
     runner = web.AppRunner(app)
@@ -47,8 +47,7 @@ async def start_webserver():
     site = web.TCPSite(runner, '0.0.0.0', 8000)
     await site.start()
     print("✅ Health check server running on http://0.0.0.0:8000/")
-    while True:
-        await asyncio.sleep(3600)  # Run forever
+    return runner
 
 def get_drive_service():
     """Initialize and return Google Drive service"""
@@ -640,7 +639,7 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         print(f"Error in error handler while sending message: {e}")
 
 async def run_bot():
-    """Run the Telegram bot"""
+    """Run the Telegram bot with proper initialization"""
     application = Application.builder().token(BOT_TOKEN).build()
     
     # [ALL YOUR ORIGINAL HANDLER SETUP CODE]
@@ -667,31 +666,41 @@ async def run_bot():
     application.add_error_handler(error_handler)
     
     print("🤖 Bot is running with proper authorization flow...")
-    await application.run_polling()
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling()
+    
+    # Keep the bot running
+    while True:
+        await asyncio.sleep(3600)
 
 async def main():
-    """Run both services concurrently"""
-    bot_task = asyncio.create_task(run_bot())
-    server_task = asyncio.create_task(start_webserver())
-    
+    """Main entry point with proper cleanup"""
+    runner = None
     try:
-        await asyncio.gather(bot_task, server_task)
+        # Start health server
+        runner = await run_webserver()
+        
+        # Start bot
+        await run_bot()
+        
     except asyncio.CancelledError:
-        print("Shutting down gracefully...")
+        print("\nShutting down gracefully...")
     except Exception as e:
         print(f"Fatal error: {str(e)}")
     finally:
-        # Cancel any remaining tasks
-        for task in [bot_task, server_task]:
-            if not task.done():
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
+        # Cleanup
+        if runner:
+            await runner.cleanup()
 
 if __name__ == "__main__":
+    # Create new event loop for clean execution
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
     try:
-        asyncio.run(main())
+        loop.run_until_complete(main())
     except KeyboardInterrupt:
-        print("Bot stopped by user")
+        print("\nBot stopped by user")
+    finally:
+        loop.close()
