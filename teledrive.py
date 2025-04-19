@@ -36,11 +36,10 @@ AUTH_STATE = 1
 pending_authorizations = {}
 
 async def health_check(request):
-    """Simple health check endpoint for Koyeb"""
     return web.Response(text="🤖 Bot is running")
 
 async def start_webserver():
-    """Start the health check server"""
+    """Run the health check server indefinitely"""
     app = web.Application()
     app.router.add_get('/', health_check)
     runner = web.AppRunner(app)
@@ -48,7 +47,8 @@ async def start_webserver():
     site = web.TCPSite(runner, '0.0.0.0', 8000)
     await site.start()
     print("✅ Health check server running on http://0.0.0.0:8000/")
-    return runner
+    while True:
+        await asyncio.sleep(3600)  # Run forever
 
 def get_drive_service():
     """Initialize and return Google Drive service"""
@@ -643,12 +643,11 @@ async def run_bot():
     """Run the Telegram bot"""
     application = Application.builder().token(BOT_TOKEN).build()
     
-    # Command handlers
+    # [ALL YOUR ORIGINAL HANDLER SETUP CODE]
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("ban", ban))
     application.add_handler(CommandHandler("unban", unban))
     
-    # Authorization conversation handler
     auth_conv = ConversationHandler(
         entry_points=[CommandHandler("auth", auth_command)],
         states={
@@ -658,7 +657,6 @@ async def run_bot():
     )
     application.add_handler(auth_conv)
     
-    # Message handler
     application.add_handler(MessageHandler(
         filters.CAPTION | filters.TEXT | filters.PHOTO |
         filters.VIDEO | filters.Document.ALL | filters.AUDIO &
@@ -666,26 +664,34 @@ async def run_bot():
         handle_message
     ))
     
-    # Error handler
     application.add_error_handler(error_handler)
     
     print("🤖 Bot is running with proper authorization flow...")
     await application.run_polling()
 
 async def main():
-    """Main async function to run both services"""
-    runner = await start_webserver()
+    """Run both services concurrently"""
+    bot_task = asyncio.create_task(run_bot())
+    server_task = asyncio.create_task(start_webserver())
+    
     try:
-        await run_bot()
+        await asyncio.gather(bot_task, server_task)
     except asyncio.CancelledError:
         print("Shutting down gracefully...")
+    except Exception as e:
+        print(f"Fatal error: {str(e)}")
     finally:
-        await runner.cleanup()
+        # Cancel any remaining tasks
+        for task in [bot_task, server_task]:
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
         print("Bot stopped by user")
-    except Exception as e:
-        print(f"Fatal error: {str(e)}")
