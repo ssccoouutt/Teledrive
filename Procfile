@@ -1,1 +1,1 @@
-worker: python teledrive.py
+web: python teledrive.py
