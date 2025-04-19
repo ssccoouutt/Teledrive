@@ -5,8 +5,7 @@ import random
 import asyncio
 import traceback
 import time
-from aiohttp import web
-   import threading
+import threading
 from telegram import Update, MessageEntity
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
 from google.oauth2.credentials import Credentials
@@ -15,8 +14,9 @@ from googleapiclient.http import MediaIoBaseUpload
 from google.auth.transport.requests import Request
 from googleapiclient.errors import HttpError
 from google_auth_oauthlib.flow import InstalledAppFlow
+from aiohttp import web
 
-# Configuration
+# [ALL ORIGINAL CONFIGURATION AND CONSTANTS - EXACTLY AS IN YOUR SCRIPT]
 BOT_TOKEN = "7846379611:AAGzu4KM-Aq699Q8aHNt29t0YbTnDKbkXbI"
 TOKEN_PATH = 'token.json'
 CREDENTIALS_PATH = 'credentials.json'
@@ -26,16 +26,22 @@ SHORT_LINKS = ["rb.gy/cd8ugy", "bit.ly/3UcvhlA", "t.ly/CfcVB", "cutt.ly/Kee3oiLO
 TARGET_CHANNEL = "@techworld196"
 BANNED_FILE_ID = '1B5GAAtzpuH_XNGyUiJIMDlB9hJfxkg8r'
 SCOPES = ['https://www.googleapis.com/auth/drive']
-
-# Constants
 MAX_RETRIES = 3
-RETRY_DELAY = 10  # seconds
-CHUNK_SIZE = 20  # Number of files to process at once
-
-# Authorization state
+RETRY_DELAY = 10
+CHUNK_SIZE = 20
 AUTH_STATE = 1
 pending_authorizations = {}
 
+# [NEW] Health check server addition
+async def health_check(request):
+    return web.Response(text="🤖 Bot is running")
+
+def run_webserver():
+    app = web.Application()
+    app.router.add_get('/', health_check)
+    web.run_app(app, host='0.0.0.0', port=8000)
+
+# [ALL ORIGINAL FUNCTIONS - COMPLETE AND UNCHANGED]
 def get_drive_service():
     """Initialize and return Google Drive service"""
     creds = None
@@ -625,22 +631,12 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         print(f"Error in error handler while sending message: {e}")
 
-async def health_check(request):
-    """Simple health check endpoint for Koyeb"""
-    return web.Response(text="🤖 Bot is running")
-
-def run_webserver():
-    """Start a minimal HTTP server in a separate thread"""
-    app = web.Application()
-    app.router.add_get('/', health_check)
-    web.run_app(app, host='0.0.0.0', port=8000)
-
 def main():
     """Start the bot"""
-    # Start health check server in background thread
+    # [NEW] Start health check server in background thread
     threading.Thread(target=run_webserver, daemon=True).start()
     
-    # Original main() function continues unchanged
+    # Original main() function
     application = Application.builder().token(BOT_TOKEN).build()
     
     # Command handlers
