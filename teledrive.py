@@ -5,7 +5,6 @@ import random
 import asyncio
 import traceback
 import time
-import threading
 from telegram import Update, MessageEntity
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
 from google.oauth2.credentials import Credentials
@@ -16,7 +15,7 @@ from googleapiclient.errors import HttpError
 from google_auth_oauthlib.flow import InstalledAppFlow
 from aiohttp import web
 
-# [ALL ORIGINAL CONFIGURATION AND CONSTANTS - EXACTLY AS IN YOUR SCRIPT]
+# Configuration
 BOT_TOKEN = "7846379611:AAGzu4KM-Aq699Q8aHNt29t0YbTnDKbkXbI"
 TOKEN_PATH = 'token.json'
 CREDENTIALS_PATH = 'credentials.json'
@@ -26,26 +25,31 @@ SHORT_LINKS = ["rb.gy/cd8ugy", "bit.ly/3UcvhlA", "t.ly/CfcVB", "cutt.ly/Kee3oiLO
 TARGET_CHANNEL = "@techworld196"
 BANNED_FILE_ID = '1B5GAAtzpuH_XNGyUiJIMDlB9hJfxkg8r'
 SCOPES = ['https://www.googleapis.com/auth/drive']
+
+# Constants
 MAX_RETRIES = 3
-RETRY_DELAY = 10
-CHUNK_SIZE = 20
+RETRY_DELAY = 10  # seconds
+CHUNK_SIZE = 20  # Number of files to process at once
+
+# Authorization state
 AUTH_STATE = 1
 pending_authorizations = {}
 
-# [NEW] Health check server addition
 async def health_check(request):
     """Simple health check endpoint for Koyeb"""
     return web.Response(text="🤖 Bot is running")
 
-async def run_webserver():
-    """Start health check server in the main event loop"""
+async def start_webserver():
+    """Start the health check server"""
     app = web.Application()
     app.router.add_get('/', health_check)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', 8000)
     await site.start()
-    print("Health check server running on http://0.0.0.0:8000/")
+    print("✅ Health check server running on http://0.0.0.0:8000/")
+    return runner
+
 def get_drive_service():
     """Initialize and return Google Drive service"""
     creds = None
@@ -635,19 +639,16 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         print(f"Error in error handler while sending message: {e}")
 
-async def main():
-    """Start both the Telegram bot and health check server"""
-    # Start health check server
-    asyncio.create_task(run_webserver())
-    
-    # Start Telegram bot
+async def run_bot():
+    """Run the Telegram bot"""
     application = Application.builder().token(BOT_TOKEN).build()
     
-    # [REST OF YOUR ORIGINAL main() FUNCTION CODE]
+    # Command handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("ban", ban))
     application.add_handler(CommandHandler("unban", unban))
     
+    # Authorization conversation handler
     auth_conv = ConversationHandler(
         entry_points=[CommandHandler("auth", auth_command)],
         states={
@@ -657,6 +658,7 @@ async def main():
     )
     application.add_handler(auth_conv)
     
+    # Message handler
     application.add_handler(MessageHandler(
         filters.CAPTION | filters.TEXT | filters.PHOTO |
         filters.VIDEO | filters.Document.ALL | filters.AUDIO &
@@ -664,10 +666,26 @@ async def main():
         handle_message
     ))
     
+    # Error handler
     application.add_error_handler(error_handler)
     
     print("🤖 Bot is running with proper authorization flow...")
     await application.run_polling()
 
+async def main():
+    """Main async function to run both services"""
+    runner = await start_webserver()
+    try:
+        await run_bot()
+    except asyncio.CancelledError:
+        print("Shutting down gracefully...")
+    finally:
+        await runner.cleanup()
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("Bot stopped by user")
+    except Exception as e:
+        print(f"Fatal error: {str(e)}")
