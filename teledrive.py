@@ -5,6 +5,8 @@ import random
 import asyncio
 import traceback
 import time
+from aiohttp import web
+   import threading
 from telegram import Update, MessageEntity
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
 from google.oauth2.credentials import Credentials
@@ -623,8 +625,22 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         print(f"Error in error handler while sending message: {e}")
 
+async def health_check(request):
+    """Simple health check endpoint for Koyeb"""
+    return web.Response(text="🤖 Bot is running")
+
+def run_webserver():
+    """Start a minimal HTTP server in a separate thread"""
+    app = web.Application()
+    app.router.add_get('/', health_check)
+    web.run_app(app, host='0.0.0.0', port=8000)
+
 def main():
     """Start the bot"""
+    # Start health check server in background thread
+    threading.Thread(target=run_webserver, daemon=True).start()
+    
+    # Original main() function continues unchanged
     application = Application.builder().token(BOT_TOKEN).build()
     
     # Command handlers
