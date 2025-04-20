@@ -6,6 +6,8 @@ import asyncio
 import traceback
 import time
 import aiohttp
+import datetime
+import socket
 from telegram import Update, MessageEntity
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
 from google.oauth2.credentials import Credentials
@@ -31,38 +33,70 @@ SCOPES = ['https://www.googleapis.com/auth/drive']
 MAX_RETRIES = 3
 RETRY_DELAY = 10  # seconds
 CHUNK_SIZE = 20  # Number of files to process at once
+PING_INTERVAL = 30  # Ping every 30 seconds
 
 # Authorization state
 AUTH_STATE = 1
 pending_authorizations = {}
 
 async def health_check(request):
-    return web.Response(text="🤖 Bot is running")
+    return web.Response(text=f"🤖 Bot is running | Last active: {datetime.datetime.now()}")
 
 async def self_ping():
-    """Ping the health check endpoint periodically to keep the app alive"""
+    """Enhanced keep-alive mechanism with multiple approaches"""
+    last_active = datetime.datetime.now()
+    
     while True:
         try:
+            # Approach 1: HTTP ping to health check
             async with aiohttp.ClientSession() as session:
                 async with session.get('http://localhost:8000/') as resp:
                     if resp.status == 200:
-                        print("✅ Self-ping successful")
+                        print(f"✅ [{datetime.datetime.now()}] HTTP ping successful")
                     else:
-                        print(f"⚠️ Self-ping failed with status {resp.status}")
+                        print(f"⚠️ [{datetime.datetime.now()}] HTTP ping failed with status {resp.status}")
+
+            # Approach 2: TCP connection to simulate activity
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.connect(('localhost', 8000))
+                s.close()
+            print(f"✅ [{datetime.datetime.now()}] TCP keepalive successful")
+
+            # Approach 3: Simple timestamp update
+            last_active = datetime.datetime.now()
+            
         except Exception as e:
-            print(f"⚠️ Self-ping error: {str(e)}")
+            print(f"⚠️ [{datetime.datetime.now()}] Keepalive error: {str(e)}")
         
-        await asyncio.sleep(60)  # Ping every 60 seconds
+        # Randomize sleep time slightly to make pattern less predictable
+        sleep_time = PING_INTERVAL + random.uniform(-5, 5)
+        await asyncio.sleep(max(10, sleep_time))  # Never sleep less than 10 seconds
 
 async def run_webserver():
-    """Run health check server in separate thread"""
+    """Run health check server with keepalive settings"""
     app = web.Application()
     app.router.add_get('/', health_check)
-    runner = web.AppRunner(app)
+    
+    # Configure server with keepalive
+    runner = web.AppRunner(app, keepalive_timeout=60)
     await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', 8000)
+    
+    # Enable TCP keepalive
+    site = web.TCPSite(
+        runner, 
+        '0.0.0.0', 
+        8000,
+        reuse_port=True,
+        socket_options=[
+            (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1),
+            (socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 30),
+            (socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10),
+            (socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 6)
+        ]
+    )
+    
     await site.start()
-    print("✅ Health check server running on http://0.0.0.0:8000/")
+    print(f"✅ [{datetime.datetime.now()}] Health server running with keepalive")
     return runner
 
 def get_drive_service():
@@ -680,7 +714,7 @@ async def run_bot():
     
     application.add_error_handler(error_handler)
     
-    print("🤖 Bot is running with proper authorization flow...")
+    print(f"✅ [{datetime.datetime.now()}] Bot is running with enhanced keepalive")
     await application.initialize()
     await application.start()
     await application.updater.start_polling()
@@ -704,9 +738,9 @@ async def main():
         await run_bot()
         
     except asyncio.CancelledError:
-        print("\nShutting down gracefully...")
+        print(f"\n[{datetime.datetime.now()}] Shutting down gracefully...")
     except Exception as e:
-        print(f"Fatal error: {str(e)}")
+        print(f"[{datetime.datetime.now()}] Fatal error: {str(e)}")
     finally:
         # Cleanup
         if self_ping_task:
@@ -727,6 +761,6 @@ if __name__ == "__main__":
     try:
         loop.run_until_complete(main())
     except KeyboardInterrupt:
-        print("\nBot stopped by user")
+        print(f"\n[{datetime.datetime.now()}] Bot stopped by user")
     finally:
         loop.close()
