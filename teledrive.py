@@ -5,6 +5,7 @@ import random
 import asyncio
 import traceback
 import time
+import aiohttp
 from telegram import Update, MessageEntity
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
 from google.oauth2.credentials import Credentials
@@ -37,6 +38,21 @@ pending_authorizations = {}
 
 async def health_check(request):
     return web.Response(text="🤖 Bot is running")
+
+async def self_ping():
+    """Ping the health check endpoint periodically to keep the app alive"""
+    while True:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get('http://localhost:8000/') as resp:
+                    if resp.status == 200:
+                        print("✅ Self-ping successful")
+                    else:
+                        print(f"⚠️ Self-ping failed with status {resp.status}")
+        except Exception as e:
+            print(f"⚠️ Self-ping error: {str(e)}")
+        
+        await asyncio.sleep(60)  # Ping every 60 seconds
 
 async def run_webserver():
     """Run health check server in separate thread"""
@@ -642,7 +658,6 @@ async def run_bot():
     """Run the Telegram bot with proper initialization"""
     application = Application.builder().token(BOT_TOKEN).build()
     
-    # [ALL YOUR ORIGINAL HANDLER SETUP CODE]
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("ban", ban))
     application.add_handler(CommandHandler("unban", unban))
@@ -677,9 +692,13 @@ async def run_bot():
 async def main():
     """Main entry point with proper cleanup"""
     runner = None
+    self_ping_task = None
     try:
         # Start health server
         runner = await run_webserver()
+        
+        # Start self-ping task
+        self_ping_task = asyncio.create_task(self_ping())
         
         # Start bot
         await run_bot()
@@ -690,6 +709,13 @@ async def main():
         print(f"Fatal error: {str(e)}")
     finally:
         # Cleanup
+        if self_ping_task:
+            self_ping_task.cancel()
+            try:
+                await self_ping_task
+            except asyncio.CancelledError:
+                pass
+                
         if runner:
             await runner.cleanup()
 
