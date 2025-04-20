@@ -7,7 +7,6 @@ import traceback
 import time
 import aiohttp
 import datetime
-import socket
 from telegram import Update, MessageEntity
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
 from google.oauth2.credentials import Credentials
@@ -40,63 +39,41 @@ AUTH_STATE = 1
 pending_authorizations = {}
 
 async def health_check(request):
+    """Health check endpoint that shows last active timestamp"""
     return web.Response(text=f"🤖 Bot is running | Last active: {datetime.datetime.now()}")
 
 async def self_ping():
     """Enhanced keep-alive mechanism with multiple approaches"""
-    last_active = datetime.datetime.now()
-    
     while True:
         try:
-            # Approach 1: HTTP ping to health check
+            # HTTP ping to health check
             async with aiohttp.ClientSession() as session:
                 async with session.get('http://localhost:8000/') as resp:
-                    if resp.status == 200:
-                        print(f"✅ [{datetime.datetime.now()}] HTTP ping successful")
-                    else:
-                        print(f"⚠️ [{datetime.datetime.now()}] HTTP ping failed with status {resp.status}")
+                    status = f"Status: {resp.status}" if resp.status != 200 else "Success"
+                    print(f"✅ [{datetime.datetime.now()}] Keepalive ping {status}")
 
-            # Approach 2: TCP connection to simulate activity
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.connect(('localhost', 8000))
-                s.close()
-            print(f"✅ [{datetime.datetime.now()}] TCP keepalive successful")
-
-            # Approach 3: Simple timestamp update
-            last_active = datetime.datetime.now()
+            # Additional activity simulation
+            with open('/tmp/last_active.txt', 'w') as f:
+                f.write(str(datetime.datetime.now()))
             
         except Exception as e:
             print(f"⚠️ [{datetime.datetime.now()}] Keepalive error: {str(e)}")
         
-        # Randomize sleep time slightly to make pattern less predictable
+        # Randomize sleep time slightly
         sleep_time = PING_INTERVAL + random.uniform(-5, 5)
-        await asyncio.sleep(max(10, sleep_time))  # Never sleep less than 10 seconds
+        await asyncio.sleep(max(10, sleep_time))
 
 async def run_webserver():
-    """Run health check server with keepalive settings"""
+    """Run health check server with simplified configuration"""
     app = web.Application()
     app.router.add_get('/', health_check)
     
-    # Configure server with keepalive
-    runner = web.AppRunner(app, keepalive_timeout=60)
+    runner = web.AppRunner(app)
     await runner.setup()
     
-    # Enable TCP keepalive
-    site = web.TCPSite(
-        runner, 
-        '0.0.0.0', 
-        8000,
-        reuse_port=True,
-        socket_options=[
-            (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1),
-            (socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 30),
-            (socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10),
-            (socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 6)
-        ]
-    )
-    
+    site = web.TCPSite(runner, '0.0.0.0', 8000)
     await site.start()
-    print(f"✅ [{datetime.datetime.now()}] Health server running with keepalive")
+    print(f"✅ [{datetime.datetime.now()}] Health server running on port 8000")
     return runner
 
 def get_drive_service():
@@ -197,7 +174,7 @@ def save_banned_items(service, banned_items):
         print(f"Error saving banned items: {str(e)}")
 
 def extract_folder_id(url):
-    """Extract folder ID from Google Drive URL with multiple pattern support"""
+    """Extract folder ID from Google Drive URL"""
     patterns = [
         r'/folders/([a-zA-Z0-9-_]+)',
         r'[?&]id=([a-zA-Z0-9-_]+)',
@@ -267,7 +244,7 @@ def copy_folder(service, folder_id, banned_items):
         raise Exception(f"Copy failed: {str(e)}")
 
 def get_all_subfolders_recursive(service, folder_id):
-    """Get all subfolder IDs recursively with chunked processing"""
+    """Get all subfolder IDs recursively"""
     subfolders = []
     queue = [folder_id]
     
@@ -296,7 +273,7 @@ def get_all_subfolders_recursive(service, folder_id):
     return subfolders
 
 def copy_files_only(service, source_id, dest_id, banned_items, overwrite=False):
-    """Copy files from source to destination with chunked processing"""
+    """Copy files from source to destination"""
     page_token = None
     while True:
         try:
@@ -321,7 +298,7 @@ def copy_files_only(service, source_id, dest_id, banned_items, overwrite=False):
             break
 
 def copy_bonus_content(service, source_id, dest_id, banned_items, overwrite=False):
-    """Copy bonus content to destination with chunked processing"""
+    """Copy bonus content to destination"""
     page_token = None
     while True:
         try:
@@ -345,7 +322,7 @@ def copy_bonus_content(service, source_id, dest_id, banned_items, overwrite=Fals
             break
 
 def copy_item_to_folder(service, item, dest_folder_id, banned_items, overwrite=False):
-    """Copy individual item to destination folder with retry"""
+    """Copy individual item to destination folder"""
     try:
         if overwrite:
             existing = execute_with_retry(service.files().list,
@@ -372,7 +349,7 @@ def copy_item_to_folder(service, item, dest_folder_id, banned_items, overwrite=F
         print(f"Error copying {item['name']}: {str(e)}")
 
 def copy_folder_contents(service, source_id, dest_id, banned_items):
-    """Copy all contents from source to destination folder with chunked processing"""
+    """Copy all contents from source to destination folder"""
     page_token = None
     while True:
         try:
@@ -408,7 +385,7 @@ def copy_folder_contents(service, source_id, dest_id, banned_items):
             break
 
 def rename_files_and_folders(service, folder_id):
-    """Rename files and folders with both @mentions and .mp4 patterns with chunked processing"""
+    """Rename files and folders with both @mentions and .mp4 patterns"""
     page_token = None
     while True:
         try:
@@ -677,7 +654,7 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     error = context.error
     tb_list = traceback.format_exception(type(error), error, error.__traceback__)
     tb_string = ''.join(tb_list)
-    print(f"Exception occurred:\n{tb_string}")
+    print(f"[{datetime.datetime.now()}] Exception occurred:\n{tb_string}")
     
     try:
         if update and update.effective_chat:
@@ -686,7 +663,7 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text="⚠️ An error occurred. Please check the format and try again."
             )
     except Exception as e:
-        print(f"Error in error handler while sending message: {e}")
+        print(f"[{datetime.datetime.now()}] Error in error handler: {e}")
 
 async def run_bot():
     """Run the Telegram bot with proper initialization"""
@@ -714,7 +691,7 @@ async def run_bot():
     
     application.add_error_handler(error_handler)
     
-    print(f"✅ [{datetime.datetime.now()}] Bot is running with enhanced keepalive")
+    print(f"✅ [{datetime.datetime.now()}] Bot initialized and ready")
     await application.initialize()
     await application.start()
     await application.updater.start_polling()
@@ -741,6 +718,7 @@ async def main():
         print(f"\n[{datetime.datetime.now()}] Shutting down gracefully...")
     except Exception as e:
         print(f"[{datetime.datetime.now()}] Fatal error: {str(e)}")
+        traceback.print_exc()
     finally:
         # Cleanup
         if self_ping_task:
@@ -752,6 +730,7 @@ async def main():
                 
         if runner:
             await runner.cleanup()
+        print(f"[{datetime.datetime.now()}] Cleanup complete")
 
 if __name__ == "__main__":
     # Create new event loop for clean execution
@@ -759,8 +738,13 @@ if __name__ == "__main__":
     asyncio.set_event_loop(loop)
     
     try:
+        print(f"[{datetime.datetime.now()}] Starting bot...")
         loop.run_until_complete(main())
     except KeyboardInterrupt:
         print(f"\n[{datetime.datetime.now()}] Bot stopped by user")
+    except Exception as e:
+        print(f"[{datetime.datetime.now()}] Critical error: {str(e)}")
+        traceback.print_exc()
     finally:
         loop.close()
+        print(f"[{datetime.datetime.now()}] Event loop closed")
