@@ -7,6 +7,7 @@ import traceback
 import time
 import aiohttp
 import datetime
+import signal
 from telegram import Update, MessageEntity
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
 from google.oauth2.credentials import Credentials
@@ -33,35 +34,52 @@ MAX_RETRIES = 3
 RETRY_DELAY = 10  # seconds
 CHUNK_SIZE = 20  # Number of files to process at once
 PING_INTERVAL = 30  # Ping every 30 seconds
+HEALTH_CHECK_PORT = 8000
 
 # Authorization state
 AUTH_STATE = 1
 pending_authorizations = {}
 
+# Global for shutdown management
+shutdown_event = asyncio.Event()
+
 async def health_check(request):
-    """Health check endpoint that shows last active timestamp"""
     return web.Response(text=f"🤖 Bot is running | Last active: {datetime.datetime.now()}")
 
 async def self_ping():
-    """Enhanced keep-alive mechanism with multiple approaches"""
-    while True:
+    """Enhanced keep-alive mechanism"""
+    while not shutdown_event.is_set():
         try:
             # HTTP ping to health check
-            async with aiohttp.ClientSession() as session:
-                async with session.get('http://localhost:8000/') as resp:
-                    status = f"Status: {resp.status}" if resp.status != 200 else "Success"
-                    print(f"✅ [{datetime.datetime.now()}] Keepalive ping {status}")
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+                try:
+                    async with session.get(f'http://localhost:{HEALTH_CHECK_PORT}/') as resp:
+                        if resp.status == 200:
+                            print(f"✅ [{datetime.datetime.now()}] Keepalive ping successful")
+                        else:
+                            print(f"⚠️ [{datetime.datetime.now()}] Ping failed with status {resp.status}")
+                except asyncio.TimeoutError:
+                    print(f"⚠️ [{datetime.datetime.now()}] Keepalive timeout")
+                except Exception as e:
+                    print(f"⚠️ [{datetime.datetime.now()}] Keepalive error: {str(e)}")
 
             # Additional activity simulation
-            with open('/tmp/last_active.txt', 'w') as f:
-                f.write(str(datetime.datetime.now()))
+            try:
+                with open('/tmp/last_active.txt', 'w') as f:
+                    f.write(str(datetime.datetime.now()))
+            except Exception as e:
+                print(f"⚠️ [{datetime.datetime.now()}] Activity simulation failed: {str(e)}")
             
         except Exception as e:
-            print(f"⚠️ [{datetime.datetime.now()}] Keepalive error: {str(e)}")
+            print(f"⚠️ [{datetime.datetime.now()}] Critical keepalive error: {str(e)}")
+            traceback.print_exc()
         
         # Randomize sleep time slightly
-        sleep_time = PING_INTERVAL + random.uniform(-5, 5)
-        await asyncio.sleep(max(10, sleep_time))
+        sleep_time = PING_INTERVAL * (0.8 + 0.4 * random.random())  # 24-42 seconds
+        try:
+            await asyncio.wait_for(shutdown_event.wait(), timeout=sleep_time)
+        except asyncio.TimeoutError:
+            pass
 
 async def run_webserver():
     """Run health check server with simplified configuration"""
@@ -71,9 +89,9 @@ async def run_webserver():
     runner = web.AppRunner(app)
     await runner.setup()
     
-    site = web.TCPSite(runner, '0.0.0.0', 8000)
+    site = web.TCPSite(runner, '0.0.0.0', HEALTH_CHECK_PORT)
     await site.start()
-    print(f"✅ [{datetime.datetime.now()}] Health server running on port 8000")
+    print(f"✅ [{datetime.datetime.now()}] Health server running on port {HEALTH_CHECK_PORT}")
     return runner
 
 def get_drive_service():
@@ -174,7 +192,7 @@ def save_banned_items(service, banned_items):
         print(f"Error saving banned items: {str(e)}")
 
 def extract_folder_id(url):
-    """Extract folder ID from Google Drive URL"""
+    """Extract folder ID from Google Drive URL with multiple pattern support"""
     patterns = [
         r'/folders/([a-zA-Z0-9-_]+)',
         r'[?&]id=([a-zA-Z0-9-_]+)',
@@ -244,7 +262,7 @@ def copy_folder(service, folder_id, banned_items):
         raise Exception(f"Copy failed: {str(e)}")
 
 def get_all_subfolders_recursive(service, folder_id):
-    """Get all subfolder IDs recursively"""
+    """Get all subfolder IDs recursively with chunked processing"""
     subfolders = []
     queue = [folder_id]
     
@@ -273,7 +291,7 @@ def get_all_subfolders_recursive(service, folder_id):
     return subfolders
 
 def copy_files_only(service, source_id, dest_id, banned_items, overwrite=False):
-    """Copy files from source to destination"""
+    """Copy files from source to destination with chunked processing"""
     page_token = None
     while True:
         try:
@@ -298,7 +316,7 @@ def copy_files_only(service, source_id, dest_id, banned_items, overwrite=False):
             break
 
 def copy_bonus_content(service, source_id, dest_id, banned_items, overwrite=False):
-    """Copy bonus content to destination"""
+    """Copy bonus content to destination with chunked processing"""
     page_token = None
     while True:
         try:
@@ -322,7 +340,7 @@ def copy_bonus_content(service, source_id, dest_id, banned_items, overwrite=Fals
             break
 
 def copy_item_to_folder(service, item, dest_folder_id, banned_items, overwrite=False):
-    """Copy individual item to destination folder"""
+    """Copy individual item to destination folder with retry"""
     try:
         if overwrite:
             existing = execute_with_retry(service.files().list,
@@ -349,7 +367,7 @@ def copy_item_to_folder(service, item, dest_folder_id, banned_items, overwrite=F
         print(f"Error copying {item['name']}: {str(e)}")
 
 def copy_folder_contents(service, source_id, dest_id, banned_items):
-    """Copy all contents from source to destination folder"""
+    """Copy all contents from source to destination folder with chunked processing"""
     page_token = None
     while True:
         try:
@@ -385,7 +403,7 @@ def copy_folder_contents(service, source_id, dest_id, banned_items):
             break
 
 def rename_files_and_folders(service, folder_id):
-    """Rename files and folders with both @mentions and .mp4 patterns"""
+    """Rename files and folders with both @mentions and .mp4 patterns with chunked processing"""
     page_token = None
     while True:
         try:
@@ -666,85 +684,135 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         print(f"[{datetime.datetime.now()}] Error in error handler: {e}")
 
 async def run_bot():
-    """Run the Telegram bot with proper initialization"""
-    application = Application.builder().token(BOT_TOKEN).build()
-    
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("ban", ban))
-    application.add_handler(CommandHandler("unban", unban))
-    
-    auth_conv = ConversationHandler(
-        entry_points=[CommandHandler("auth", auth_command)],
-        states={
-            AUTH_STATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_auth_code)]
-        },
-        fallbacks=[CommandHandler("cancel", cancel_auth)]
-    )
-    application.add_handler(auth_conv)
-    
-    application.add_handler(MessageHandler(
-        filters.CAPTION | filters.TEXT | filters.PHOTO |
-        filters.VIDEO | filters.Document.ALL | filters.AUDIO &
-        ~filters.COMMAND,
-        handle_message
-    ))
-    
-    application.add_error_handler(error_handler)
-    
-    print(f"✅ [{datetime.datetime.now()}] Bot initialized and ready")
-    await application.initialize()
-    await application.start()
-    await application.updater.start_polling()
-    
-    # Keep the bot running
-    while True:
-        await asyncio.sleep(3600)
+    """Run the Telegram bot with automatic reconnection"""
+    attempt = 0
+    while not shutdown_event.is_set():
+        try:
+            application = Application.builder().token(BOT_TOKEN).build()
+            
+            # Add all handlers
+            application.add_handler(CommandHandler("start", start))
+            application.add_handler(CommandHandler("ban", ban))
+            application.add_handler(CommandHandler("unban", unban))
+            
+            auth_conv = ConversationHandler(
+                entry_points=[CommandHandler("auth", auth_command)],
+                states={
+                    AUTH_STATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_auth_code)]
+                },
+                fallbacks=[CommandHandler("cancel", cancel_auth)]
+            )
+            application.add_handler(auth_conv)
+            
+            application.add_handler(MessageHandler(
+                filters.CAPTION | filters.TEXT | filters.PHOTO |
+                filters.VIDEO | filters.Document.ALL | filters.AUDIO &
+                ~filters.COMMAND,
+                handle_message
+            ))
+            
+            application.add_error_handler(error_handler)
+            
+            print(f"[{datetime.datetime.now()}] Bot initialization attempt {attempt + 1}")
+            await application.initialize()
+            await application.start()
+            await application.updater.start_polling()
+            
+            print(f"[{datetime.datetime.now()}] Bot started successfully")
+            attempt = 0  # Reset attempt counter on success
+            
+            # Run until shutdown
+            while not shutdown_event.is_set():
+                await asyncio.sleep(1)
+                
+            # Cleanup on shutdown
+            print(f"[{datetime.datetime.now()}] Shutting down bot...")
+            await application.stop()
+            await application.shutdown()
+            return
+            
+        except Exception as e:
+            attempt += 1
+            print(f"[{datetime.datetime.now()}] Bot connection failed (attempt {attempt}): {str(e)}")
+            traceback.print_exc()
+            
+            if shutdown_event.is_set():
+                return
+                
+            print(f"[{datetime.datetime.now()}] Retrying in {RECONNECT_DELAY} seconds...")
+            await asyncio.sleep(RECONNECT_DELAY)
+
+async def handle_signal(signal):
+    """Handle shutdown signals gracefully"""
+    print(f"\n[{datetime.datetime.now()}] Received signal {signal.name}, shutting down...")
+    shutdown_event.set()
 
 async def main():
-    """Main entry point with proper cleanup"""
+    """Main application entry point"""
+    # Set up signal handlers
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, lambda: asyncio.create_task(handle_signal(sig)))
+    
     runner = None
     self_ping_task = None
+    bot_task = None
+    
     try:
         # Start health server
         runner = await run_webserver()
         
-        # Start self-ping task
+        # Start keepalive system
         self_ping_task = asyncio.create_task(self_ping())
         
-        # Start bot
-        await run_bot()
+        # Start bot with automatic reconnection
+        bot_task = asyncio.create_task(run_bot())
+        await bot_task
         
     except asyncio.CancelledError:
-        print(f"\n[{datetime.datetime.now()}] Shutting down gracefully...")
+        print(f"\n[{datetime.datetime.now()}] Shutdown initiated")
     except Exception as e:
         print(f"[{datetime.datetime.now()}] Fatal error: {str(e)}")
         traceback.print_exc()
     finally:
-        # Cleanup
-        if self_ping_task:
+        # Cleanup tasks
+        print(f"[{datetime.datetime.now()}] Starting cleanup...")
+        tasks = []
+        
+        if self_ping_task and not self_ping_task.done():
             self_ping_task.cancel()
-            try:
-                await self_ping_task
-            except asyncio.CancelledError:
-                pass
-                
+            tasks.append(self_ping_task)
+            
+        if bot_task and not bot_task.done():
+            bot_task.cancel()
+            tasks.append(bot_task)
+            
+        if tasks:
+            await asyncio.wait(tasks, timeout=10)
+            
         if runner:
             await runner.cleanup()
-        print(f"[{datetime.datetime.now()}] Cleanup complete")
+            
+        print(f"[{datetime.datetime.now()}] Cleanup complete. Exiting.")
 
 if __name__ == "__main__":
-    # Create new event loop for clean execution
+    # Create and configure event loop
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     
     try:
-        print(f"[{datetime.datetime.now()}] Starting bot...")
+        print(f"[{datetime.datetime.now()}] Starting TechZoneX Auto Forward Bot...")
         loop.run_until_complete(main())
     except KeyboardInterrupt:
         print(f"\n[{datetime.datetime.now()}] Bot stopped by user")
     except Exception as e:
-        print(f"[{datetime.datetime.now()}] Critical error: {str(e)}")
+        print(f"[{datetime.datetime.now()}] Critical startup error: {str(e)}")
         traceback.print_exc()
     finally:
+        # Ensure all async tasks are cleaned up
+        pending = asyncio.all_tasks(loop)
+        if pending:
+            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+        
         loop.close()
-        print(f"[{datetime.datetime.now()}] Event loop closed")
+        print(f"[{datetime.datetime.now()}] Event loop closed. Goodbye!")
