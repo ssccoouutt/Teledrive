@@ -5,6 +5,9 @@ import traceback
 import random
 from telegram.ext import Application
 
+# Define the token at the top of the file
+BOT_TOKEN = "7846379611:AAGzu4KM-Aq699Q8aHNt29t0YbTnDKbkXbI"
+
 class EternalBot:
     def __init__(self, bot_token):
         self.bot_token = bot_token
@@ -87,7 +90,7 @@ async def main():
         loop.add_signal_handler(
             sig, 
             lambda s=sig: asyncio.create_task(shutdown_handler(s, bot))
-        )  # Corrected line
+        )
     try:
         await bot.run_forever()
     except Exception as e:
@@ -110,5 +113,3 @@ if __name__ == "__main__":
             loop.run_until_complete(asyncio.wait(pending, timeout=5))
         loop.close()
         print("✅ Event loop closed")
-
-BOT_TOKEN = "7846379611:AAGzu4KM-Aq699Q8aHNt29t0YbTnDKbkXbI"
