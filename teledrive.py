@@ -6,6 +6,9 @@ import asyncio
 import traceback
 import time
 import aiohttp
+import logging
+import signal
+from datetime import datetime
 from aiohttp import web
 from telegram import Update, MessageEntity
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
@@ -44,6 +47,13 @@ pending_authorizations = {}
 # Global variables for web server
 runner = None
 site = None
+
+# Initialize logging
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
 def get_drive_service():
     """Initialize and return Google Drive service"""
@@ -176,7 +186,7 @@ def initialize_banned_items(service):
         banned_file = request.execute()
         return banned_file.decode('utf-8').splitlines()
     except Exception as e:
-        print(f"Error loading banned items: {str(e)}")
+        logger.error(f"Error loading banned items: {str(e)}")
         return []
 
 def save_banned_items(service, banned_items):
@@ -186,7 +196,7 @@ def save_banned_items(service, banned_items):
         media = MediaIoBaseUpload(io.BytesIO(content), mimetype='text/plain')
         service.files().update(fileId=BANNED_FILE_ID, media_body=media).execute()
     except Exception as e:
-        print(f"Error saving banned items: {str(e)}")
+        logger.error(f"Error saving banned items: {str(e)}")
 
 def extract_folder_id(url):
     """Extract folder ID from Google Drive URL with multiple pattern support"""
@@ -219,14 +229,14 @@ def execute_with_retry(func, *args, **kwargs):
         except HttpError as e:
             if e.resp.status in [500, 502, 503, 504] or 'timed out' in str(e).lower():
                 last_exception = e
-                print(f"Attempt {attempt + 1} failed, retrying in {RETRY_DELAY} seconds...")
+                logger.warning(f"Attempt {attempt + 1} failed, retrying in {RETRY_DELAY} seconds...")
                 time.sleep(RETRY_DELAY)
                 continue
             raise
         except Exception as e:
             if 'timed out' in str(e).lower() and attempt < MAX_RETRIES - 1:
                 last_exception = e
-                print(f"Attempt {attempt + 1} failed, retrying in {RETRY_DELAY} seconds...")
+                logger.warning(f"Attempt {attempt + 1} failed, retrying in {RETRY_DELAY} seconds...")
                 time.sleep(RETRY_DELAY)
                 continue
             raise
@@ -283,7 +293,7 @@ def get_all_subfolders_recursive(service, folder_id):
                 if not page_token:
                     break
             except Exception as e:
-                print(f"Error getting subfolders: {str(e)}")
+                logger.error(f"Error getting subfolders: {str(e)}")
                 break
     return subfolders
 
@@ -309,7 +319,7 @@ def copy_files_only(service, source_id, dest_id, banned_items, overwrite=False):
             if not page_token:
                 break
         except Exception as e:
-            print(f"Error copying files: {str(e)}")
+            logger.error(f"Error copying files: {str(e)}")
             break
 
 def copy_bonus_content(service, source_id, dest_id, banned_items, overwrite=False):
@@ -333,7 +343,7 @@ def copy_bonus_content(service, source_id, dest_id, banned_items, overwrite=Fals
             if not page_token:
                 break
         except Exception as e:
-            print(f"Error copying bonus content: {str(e)}")
+            logger.error(f"Error copying bonus content: {str(e)}")
             break
 
 def copy_item_to_folder(service, item, dest_folder_id, banned_items, overwrite=False):
@@ -361,7 +371,7 @@ def copy_item_to_folder(service, item, dest_folder_id, banned_items, overwrite=F
                 body={'parents': [dest_folder_id]}
             ).execute()
     except Exception as e:
-        print(f"Error copying {item['name']}: {str(e)}")
+        logger.error(f"Error copying {item['name']}: {str(e)}")
 
 def copy_folder_contents(service, source_id, dest_id, banned_items):
     """Copy all contents from source to destination folder with chunked processing"""
@@ -396,7 +406,7 @@ def copy_folder_contents(service, source_id, dest_id, banned_items):
             if not page_token:
                 break
         except Exception as e:
-            print(f"Error copying folder contents: {str(e)}")
+            logger.error(f"Error copying folder contents: {str(e)}")
             break
 
 def rename_files_and_folders(service, folder_id):
@@ -431,14 +441,14 @@ def rename_files_and_folders(service, folder_id):
                             body={'name': new_name}
                         ).execute()
                 except Exception as e:
-                    print(f"Error renaming {item['name']}: {str(e)}")
+                    logger.error(f"Error renaming {item['name']}: {str(e)}")
                     continue
             
             page_token = response.get('nextPageToken')
             if not page_token:
                 break
         except Exception as e:
-            print(f"Error listing files for renaming: {str(e)}")
+            logger.error(f"Error listing files for renaming: {str(e)}")
             break
 
 def validate_entity_positions(text, entities):
@@ -474,7 +484,7 @@ def validate_entity_positions(text, entities):
                     length=entity.length
                 ))
         except Exception as e:
-            print(f"Skipping invalid entity: {str(e)}")
+            logger.error(f"Skipping invalid entity: {str(e)}")
             continue
             
     return valid_entities
@@ -669,7 +679,7 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     error = context.error
     tb_list = traceback.format_exception(type(error), error, error.__traceback__)
     tb_string = ''.join(tb_list)
-    print(f"Exception occurred:\n{tb_string}")
+    logger.error(f"Exception occurred:\n{tb_string}")
     
     try:
         if update and update.effective_chat:
@@ -678,7 +688,7 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text="⚠️ An error occurred. Please check the format and try again."
             )
     except Exception as e:
-        print(f"Error in error handler while sending message: {e}")
+        logger.error(f"Error in error handler while sending message: {e}")
 
 async def shutdown(signal, loop):
     """Cleanup tasks tied to the service's shutdown."""
@@ -743,6 +753,7 @@ async def main():
     for s in signals:
         loop.add_signal_handler(
             s, lambda s=s: asyncio.create_task(shutdown(s, loop))
+        )
     
     try:
         await run_bot()
@@ -766,11 +777,4 @@ async def main():
         logger.info("Cleanup completed")
 
 if __name__ == "__main__":
-    # Initialize logging
-    logging.basicConfig(
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        level=logging.INFO
-    )
-    logger = logging.getLogger(__name__)
-    
     asyncio.run(main())
