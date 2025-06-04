@@ -786,11 +786,11 @@ async def main():
     """Main entry point with proper shutdown handling"""
     loop = asyncio.get_event_loop()
     
-    # Set up signal handlers
-    signals = (signal.SIGHUP, signal.SIGTERM, signal.SIGINT)
-    for s in signals:
+    # Set up signal handlers - FIXED VERSION
+    for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(
-            s, lambda s=s: asyncio.create_task(shutdown(s, loop))
+            sig,
+            lambda s=sig: asyncio.create_task(shutdown(s, loop))
     
     try:
         await run_bot()
