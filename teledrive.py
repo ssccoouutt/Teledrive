@@ -29,6 +29,7 @@ SHORT_LINKS = ["rb.gy/cd8ugy", "bit.ly/3UcvhlA", "t.ly/CfcVB", "cutt.ly/Kee3oiLO
 TARGET_CHANNEL = "@techworld196"
 BANNED_FILE_ID = '1r2BpwG9isOkKjL5tYj3WqqiF5w4oWpCY'
 SCOPES = ['https://www.googleapis.com/auth/drive']
+MAX_CAPTION_LENGTH = 1000  # Telegram's limit is 1024, keeping buffer
 
 # Web Server Configuration
 WEB_PORT = 8000
@@ -254,26 +255,17 @@ def execute_with_retry(func, *args, **kwargs):
             raise
     raise Exception(f"Operation failed after {MAX_RETRIES} attempts. Last error: {str(last_exception)}")
 
-def check_permissions(service, item_id):
-    """Check if the file/folder can be copied by examining permissions"""
+def check_item_access(service, item_id):
+    """Check if we have access to the item"""
     try:
-        # First check if we can access the item
         execute_with_retry(service.files().get, fileId=item_id, fields='id')
-        
-        # Then check sharing permissions
-        permissions = execute_with_retry(service.permissions().list, 
-                                      fileId=item_id,
-                                      fields='permissions(type,role)')
-        for perm in permissions.get('permissions', []):
-            if perm['type'] == 'anyone' and perm['role'] in ['reader', 'writer']:
-                return True
-        return False
+        return True
     except HttpError as e:
         if e.resp.status == 403:
             return False
         raise
     except Exception as e:
-        logger.error(f"Error checking permissions: {str(e)}")
+        logger.error(f"Error checking access: {str(e)}")
         return False
 
 def safe_delete(service, item_id):
@@ -298,9 +290,13 @@ def copy_file(service, file_id, banned_items):
     except Exception as e:
         raise Exception(f"File copy failed: {str(e)}")
 
-def copy_folder(service, folder_id, banned_items):
-    """Copy a folder and its contents with retry mechanism"""
+def copy_folder_with_permission_check(service, folder_id, banned_items):
+    """Copy folder and its contents with thorough permission checking"""
     try:
+        # Verify we can access the folder
+        if not check_item_access(service, folder_id):
+            raise Exception("Cannot access folder - permission denied")
+
         folder = execute_with_retry(service.files().get, fileId=folder_id, fields='name')
         new_folder = service.files().create(body={
             'name': folder['name'],
@@ -308,21 +304,52 @@ def copy_folder(service, folder_id, banned_items):
         }).execute()
         new_folder_id = new_folder['id']
 
-        copy_folder_contents(service, folder_id, new_folder_id, banned_items)
-        subfolders = get_all_subfolders_recursive(service, new_folder_id)
-        
-        for subfolder_id in subfolders:
-            copy_files_only(service, PHASE2_SOURCE, subfolder_id, banned_items, overwrite=True)
+        # Copy contents with permission checking
+        page_token = None
+        while True:
+            response = execute_with_retry(service.files().list,
+                q=f"'{folder_id}' in parents",
+                fields='nextPageToken, files(id, name, mimeType)',
+                pageSize=CHUNK_SIZE,
+                pageToken=page_token
+            )
+            
+            for item in response.get('files', []):
+                if should_skip_item(item['name'], banned_items):
+                    continue
+                    
+                if not check_item_access(service, item['id']):
+                    raise Exception(f"Cannot access item: {item['name']}")
 
+                if item['mimeType'] == 'application/vnd.google-apps.folder':
+                    new_subfolder = service.files().create(body={
+                        'name': item['name'],
+                        'parents': [new_folder_id],
+                        'mimeType': 'application/vnd.google-apps.folder'
+                    }).execute()
+                    copy_folder_with_permission_check(service, item['id'], banned_items)
+                else:
+                    service.files().copy(
+                        fileId=item['id'],
+                        body={'parents': [new_folder_id]}
+                    ).execute()
+                    
+            page_token = response.get('nextPageToken')
+            if not page_token:
+                break
+
+        # Copy bonus content if everything succeeded
+        copy_files_only(service, PHASE2_SOURCE, new_folder_id, banned_items, overwrite=True)
         copy_bonus_content(service, PHASE3_SOURCE, new_folder_id, banned_items, overwrite=True)
         rename_files_and_folders(service, new_folder_id)
         
-        for subfolder_id in subfolders:
-            rename_files_and_folders(service, subfolder_id)
-
         return new_folder_id
+        
     except Exception as e:
-        raise Exception(f"Copy failed: {str(e)}")
+        # Clean up if we created the folder but failed to copy contents
+        if 'new_folder_id' in locals():
+            safe_delete(service, new_folder_id)
+        raise
 
 def get_all_subfolders_recursive(service, folder_id):
     """Get all subfolder IDs recursively with chunked processing"""
@@ -559,19 +586,19 @@ def filter_entities(entities):
     return [e for e in entities if e.type in allowed_types] if entities else []
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle incoming messages"""
+    """Handle incoming messages with proper private content handling"""
     message = update.message
     if not message or (message.text and message.text.startswith('/')):
         return
 
     original_text = message.caption or message.text or ''
     original_entities = message.caption_entities if message.caption else message.entities
-    processed_text = original_text
-    error_messages = []
-
+    
     try:
         drive_service = get_drive_service()
         banned_items = initialize_banned_items(drive_service)
+        processed_text = original_text
+        caption_too_long = False
 
         if original_text:
             url_matches = list(re.finditer(
@@ -583,82 +610,59 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 url = match.group()
                 folder_id = extract_folder_id(url)
                 file_id = extract_file_id(url)
-                new_id = None
                 
                 try:
                     if folder_id:
-                        # Check permissions before copying
-                        if not check_permissions(drive_service, folder_id):
-                            error_msg = f"⛔ Private Folder (Not Copied): {url}"
-                            error_messages.append(error_msg)
-                            processed_text = processed_text.replace(url, error_msg)
+                        try:
+                            new_folder_id = await asyncio.get_event_loop().run_in_executor(
+                                None, copy_folder_with_permission_check, 
+                                drive_service, folder_id, banned_items
+                            )
+                            random_link = random.choice(SHORT_LINKS)
+                            new_url = f'https://drive.google.com/drive/folders/{new_folder_id} {random_link}'
+                            processed_text = processed_text.replace(url, new_url)
+                        except Exception as e:
+                            processed_text = processed_text.replace(url, "⛔ Private/Uncopyable Folder")
                             continue
                             
-                        # Copy the folder
-                        new_id = await asyncio.get_event_loop().run_in_executor(
-                            None, copy_folder, drive_service, folder_id, banned_items
-                        )
-                        
-                        # Verify the copy was successful
-                        if not check_permissions(drive_service, new_id):
-                            error_msg = f"⛔ Couldn't Copy Folder (Permissions Lost): {url}"
-                            error_messages.append(error_msg)
-                            safe_delete(drive_service, new_id)
-                            processed_text = processed_text.replace(url, error_msg)
-                            continue
-                            
-                        random_link = random.choice(SHORT_LINKS)
-                        new_url = f'https://drive.google.com/drive/folders/{new_id} {random_link}'
-                        processed_text = processed_text.replace(url, new_url)
-                        
                     elif file_id:
-                        # Check permissions before copying
-                        if not check_permissions(drive_service, file_id):
-                            error_msg = f"⛔ Private File (Not Copied): {url}"
-                            error_messages.append(error_msg)
-                            processed_text = processed_text.replace(url, error_msg)
+                        try:
+                            if not check_item_access(drive_service, file_id):
+                                processed_text = processed_text.replace(url, "⛔ Private/Uncopyable File")
+                                continue
+                                
+                            new_file_id = await asyncio.get_event_loop().run_in_executor(
+                                None, copy_file, drive_service, file_id, banned_items
+                            )
+                            random_link = random.choice(SHORT_LINKS)
+                            new_url = f'https://drive.google.com/file/d/{new_file_id}/view?usp=sharing {random_link}'
+                            processed_text = processed_text.replace(url, new_url)
+                        except Exception as e:
+                            processed_text = processed_text.replace(url, "⛔ Error Processing File")
                             continue
                             
-                        # Copy the file
-                        new_id = await asyncio.get_event_loop().run_in_executor(
-                            None, copy_file, drive_service, file_id, banned_items
-                        )
-                        
-                        # Verify the copy was successful
-                        if not check_permissions(drive_service, new_id):
-                            error_msg = f"⛔ Couldn't Copy File (Permissions Lost): {url}"
-                            error_messages.append(error_msg)
-                            safe_delete(drive_service, new_id)
-                            processed_text = processed_text.replace(url, error_msg)
-                            continue
-                            
-                        random_link = random.choice(SHORT_LINKS)
-                        new_url = f'https://drive.google.com/file/d/{new_id}/view?usp=sharing {random_link}'
-                        processed_text = processed_text.replace(url, new_url)
-                        
                 except Exception as e:
-                    error_msg = f"⚠️ Error Processing: {url} - {str(e)}"
-                    error_messages.append(error_msg)
-                    if new_id:
-                        safe_delete(drive_service, new_id)
-                    processed_text = processed_text.replace(url, error_msg)
+                    logger.error(f"Unexpected error processing URL {url}: {str(e)}")
+                    processed_text = processed_text.replace(url, "⚠️ Processing Error")
                     continue
 
-            # Prepare final text with errors if any
-            final_text = processed_text
-            if error_messages:
-                final_text += "\n\n" + "\n".join(error_messages)
+            # Truncate caption if too long
+            if len(processed_text) > MAX_CAPTION_LENGTH:
+                processed_text = processed_text[:MAX_CAPTION_LENGTH-100] + "... [truncated]"
+                caption_too_long = True
 
+            # Prepare entities for the final message
             filtered_entities = filter_entities(original_entities)
-            valid_entities = validate_entity_positions(final_text, filtered_entities)
+            valid_entities = validate_entity_positions(processed_text, filtered_entities)
         else:
-            final_text = ''
+            processed_text = ''
             valid_entities = []
 
+        # Prepare message based on content type
         send_args = {
             'chat_id': TARGET_CHANNEL,
             'disable_notification': True,
-            'caption': final_text,
+            'caption': processed_text,
             'caption_entities': valid_entities
         }
 
@@ -684,10 +688,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         else:
             await context.bot.send_message(
-                text=final_text,
+                text=processed_text,
                 entities=valid_entities,
                 disable_notification=True,
                 chat_id=TARGET_CHANNEL
+            )
+
+        if caption_too_long:
+            await context.bot.send_message(
+                chat_id=TARGET_CHANNEL,
+                text="⚠️ Note: Original caption was too long and was truncated",
+                disable_notification=True
             )
 
     except Exception as e:
@@ -852,9 +863,12 @@ async def main():
     """Main entry point with proper shutdown handling"""
     loop = asyncio.get_event_loop()
     
-    # SIMPLEST WORKING VERSION
-    loop.add_signal_handler(signal.SIGINT, lambda: asyncio.create_task(shutdown(signal.SIGINT, loop)))
-    loop.add_signal_handler(signal.SIGTERM, lambda: asyncio.create_task(shutdown(signal.SIGTERM, loop)))
+    # Set up signal handlers
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(
+            sig,
+            lambda s=sig: asyncio.create_task(shutdown(s, loop))
+        )
     
     try:
         await run_bot()
