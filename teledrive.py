@@ -201,11 +201,12 @@ def save_banned_items(service, banned_items):
 def extract_folder_id(url):
     """Extract folder ID from Google Drive URL with multiple pattern support"""
     patterns = [
-        r'/folders/([a-zA-Z0-9-_]+)',
-        r'[?&]id=([a-zA-Z0-9-_]+)',
-        r'/folderview[?&]id=([a-zA-Z0-9-_]+)',
-        r'/mobile/folders/([a-zA-Z0-9-_]+)',
-        r'/mobile/folders/[^/]+/([a-zA-Z0-9-_]+)'
+        r'/folders/([a-zA-Z0-9-_]+)',  # Standard folder link
+        r'[?&]id=([a-zA-Z0-9-_]+)',     # ID parameter links
+        r'/folderview[?&]id=([a-zA-Z0-9-_]+)',  # Folderview links
+        r'/mobile/folders/([a-zA-Z0-9-_]+)',  # Mobile folder links
+        r'/mobile/folders/[^/]+/([a-zA-Z0-9-_]+)',  # Nested mobile folder links
+        r'/drive/u/\d+/mobile/folders/([a-zA-Z0-9-_]+)'  # Mobile folder links with user number
     ]
     for pattern in patterns:
         match = re.search(pattern, url)
@@ -541,11 +542,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         banned_items = initialize_banned_items(drive_service)
 
         if original_text:
-            # Updated regex pattern to handle more Google Drive URL formats
-            url_matches = list(re.finditer(
-                r'https?://(?:drive\.google\.com/(?:drive/folders/|folderview\?id=|file/d/|open\?id=|uc\?id=|mobile/folders/|mobile\?id=|.*[?&]id=)|.*\.google\.com/open\?id=)[\w-]+[^\s>]*',
-                original_text
-            ))
+            # In handle_message() function, update the url_matches line to:
+url_matches = list(re.finditer(
+    r'https?://(?:drive\.google\.com/(?:drive/folders/|folderview\?id=|file/d/|open\?id=|uc\?id=|mobile/folders/|mobile\?id=|.*[?&]id=|drive/u/\d+/mobile/folders/)|.*\.google\.com/open\?id=)[\w-]+[^\s>]*',
+    original_text
+))
             
             for match in url_matches:
                 url = match.group()
