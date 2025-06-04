@@ -203,7 +203,9 @@ def extract_folder_id(url):
     patterns = [
         r'/folders/([a-zA-Z0-9-_]+)',
         r'[?&]id=([a-zA-Z0-9-_]+)',
-        r'/folderview[?&]id=([a-zA-Z0-9-_]+)'
+        r'/folderview[?&]id=([a-zA-Z0-9-_]+)',
+        r'/mobile/folders/([a-zA-Z0-9-_]+)',
+        r'/mobile/folders/[^/]+/([a-zA-Z0-9-_]+)'
     ]
     for pattern in patterns:
         match = re.search(pattern, url)
@@ -212,9 +214,18 @@ def extract_folder_id(url):
     return None
 
 def extract_file_id(url):
-    """Extract file ID from Google Drive URL"""
-    match = re.search(r'/file/d/([a-zA-Z0-9-_]+)', url)
-    return match.group(1) if match else None
+    """Extract file ID from Google Drive URL with multiple pattern support"""
+    patterns = [
+        r'/file/d/([a-zA-Z0-9-_]+)',
+        r'/open\?id=([a-zA-Z0-9-_]+)',
+        r'/uc\?id=([a-zA-Z0-9-_]+)',
+        r'/mobile\?id=([a-zA-Z0-9-_]+)'
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    return None
 
 def should_skip_item(name, banned_items):
     """Check if item should be skipped based on banned list"""
@@ -241,6 +252,19 @@ def execute_with_retry(func, *args, **kwargs):
                 continue
             raise
     raise Exception(f"Operation failed after {MAX_RETRIES} attempts. Last error: {str(last_exception)}")
+
+def copy_file(service, file_id, banned_items):
+    """Copy a single file with retry mechanism"""
+    try:
+        file = execute_with_retry(service.files().get, fileId=file_id, fields='name,mimeType')
+        
+        if should_skip_item(file['name'], banned_items):
+            raise Exception(f"File {file['name']} is banned")
+            
+        copied_file = service.files().copy(fileId=file_id).execute()
+        return copied_file['id']
+    except Exception as e:
+        raise Exception(f"File copy failed: {str(e)}")
 
 def copy_folder(service, folder_id, banned_items):
     """Copy a folder and its contents with retry mechanism"""
@@ -517,14 +541,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         banned_items = initialize_banned_items(drive_service)
 
         if original_text:
+            # Updated regex pattern to handle more Google Drive URL formats
             url_matches = list(re.finditer(
-                r'https?://(?:drive\.google\.com/(?:drive/folders/|folderview\?id=|.*[?&]id=)|.*\.google\.com/open\?id=)[\w-]+[^\s>]*',
+                r'https?://(?:drive\.google\.com/(?:drive/folders/|folderview\?id=|file/d/|open\?id=|uc\?id=|mobile/folders/|mobile\?id=|.*[?&]id=)|.*\.google\.com/open\?id=)[\w-]+[^\s>]*',
                 original_text
             ))
             
             for match in url_matches:
                 url = match.group()
                 folder_id = extract_folder_id(url)
+                file_id = extract_file_id(url)
                 
                 if folder_id:
                     try:
@@ -536,7 +562,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         drive_links.append((url, new_url))
                         original_text = original_text.replace(url, new_url)
                     except Exception as e:
-                        await message.reply_text(f"⚠️ Error processing {url}: {str(e)}")
+                        await message.reply_text(f"⚠️ Error processing folder {url}: {str(e)}")
+                        continue
+                elif file_id:
+                    try:
+                        new_file_id = await asyncio.get_event_loop().run_in_executor(
+                            None, copy_file, drive_service, file_id, banned_items
+                        )
+                        random_link = random.choice(SHORT_LINKS)
+                        new_url = f'https://drive.google.com/file/d/{new_file_id}/view?usp=sharing {random_link}'
+                        drive_links.append((url, new_url))
+                        original_text = original_text.replace(url, new_url)
+                    except Exception as e:
+                        await message.reply_text(f"⚠️ Error processing file {url}: {str(e)}")
                         continue
 
             if drive_links:
@@ -753,7 +791,6 @@ async def main():
     for s in signals:
         loop.add_signal_handler(
             s, lambda s=s: asyncio.create_task(shutdown(s, loop))
-        )
     
     try:
         await run_bot()
