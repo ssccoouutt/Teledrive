@@ -542,11 +542,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         banned_items = initialize_banned_items(drive_service)
 
         if original_text:
-            # In handle_message() function, update the url_matches line to:
-url_matches = list(re.finditer(
-    r'https?://(?:drive\.google\.com/(?:drive/folders/|folderview\?id=|file/d/|open\?id=|uc\?id=|mobile/folders/|mobile\?id=|.*[?&]id=|drive/u/\d+/mobile/folders/)|.*\.google\.com/open\?id=)[\w-]+[^\s>]*',
-    original_text
-))
+            # Updated regex pattern to handle all Google Drive URL formats
+            url_matches = list(re.finditer(
+                r'https?://(?:drive\.google\.com/(?:drive/folders/|folderview\?id=|file/d/|open\?id=|uc\?id=|mobile/folders/|mobile\?id=|.*[?&]id=|drive/u/\d+/mobile/folders/)|.*\.google\.com/open\?id=)[\w-]+[^\s>]*',
+                original_text
+            ))
             
             for match in url_matches:
                 url = match.group()
@@ -590,6 +590,7 @@ url_matches = list(re.finditer(
             final_text = ''
             valid_entities = []
 
+        # Rest of the function remains the same...
         send_args = {
             'chat_id': TARGET_CHANNEL,
             'disable_notification': True,
