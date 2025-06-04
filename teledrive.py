@@ -254,6 +254,37 @@ def execute_with_retry(func, *args, **kwargs):
             raise
     raise Exception(f"Operation failed after {MAX_RETRIES} attempts. Last error: {str(last_exception)}")
 
+def check_permissions(service, item_id):
+    """Check if the file/folder can be copied by examining permissions"""
+    try:
+        # First check if we can access the item
+        execute_with_retry(service.files().get, fileId=item_id, fields='id')
+        
+        # Then check sharing permissions
+        permissions = execute_with_retry(service.permissions().list, 
+                                      fileId=item_id,
+                                      fields='permissions(type,role)')
+        for perm in permissions.get('permissions', []):
+            if perm['type'] == 'anyone' and perm['role'] in ['reader', 'writer']:
+                return True
+        return False
+    except HttpError as e:
+        if e.resp.status == 403:
+            return False
+        raise
+    except Exception as e:
+        logger.error(f"Error checking permissions: {str(e)}")
+        return False
+
+def safe_delete(service, item_id):
+    """Safely delete a file or folder with error handling"""
+    try:
+        execute_with_retry(service.files().delete, fileId=item_id)
+        return True
+    except Exception as e:
+        logger.error(f"Error deleting item {item_id}: {str(e)}")
+        return False
+
 def copy_file(service, file_id, banned_items):
     """Copy a single file with retry mechanism"""
     try:
@@ -535,14 +566,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     original_text = message.caption or message.text or ''
     original_entities = message.caption_entities if message.caption else message.entities
-    drive_links = []
+    processed_text = original_text
+    error_messages = []
 
     try:
         drive_service = get_drive_service()
         banned_items = initialize_banned_items(drive_service)
 
         if original_text:
-            # Updated regex pattern to handle all Google Drive URL formats
             url_matches = list(re.finditer(
                 r'https?://(?:drive\.google\.com/(?:drive/folders/|folderview\?id=|file/d/|open\?id=|uc\?id=|mobile/folders/|mobile\?id=|.*[?&]id=|drive/u/\d+/mobile/folders/)|.*\.google\.com/open\?id=)[\w-]+[^\s>]*',
                 original_text
@@ -552,37 +583,71 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 url = match.group()
                 folder_id = extract_folder_id(url)
                 file_id = extract_file_id(url)
+                new_id = None
                 
-                if folder_id:
-                    try:
-                        new_folder_id = await asyncio.get_event_loop().run_in_executor(
+                try:
+                    if folder_id:
+                        # Check permissions before copying
+                        if not check_permissions(drive_service, folder_id):
+                            error_msg = f"⛔ Private Folder (Not Copied): {url}"
+                            error_messages.append(error_msg)
+                            processed_text = processed_text.replace(url, error_msg)
+                            continue
+                            
+                        # Copy the folder
+                        new_id = await asyncio.get_event_loop().run_in_executor(
                             None, copy_folder, drive_service, folder_id, banned_items
                         )
+                        
+                        # Verify the copy was successful
+                        if not check_permissions(drive_service, new_id):
+                            error_msg = f"⛔ Couldn't Copy Folder (Permissions Lost): {url}"
+                            error_messages.append(error_msg)
+                            safe_delete(drive_service, new_id)
+                            processed_text = processed_text.replace(url, error_msg)
+                            continue
+                            
                         random_link = random.choice(SHORT_LINKS)
-                        new_url = f'https://drive.google.com/drive/folders/{new_folder_id} {random_link}'
-                        drive_links.append((url, new_url))
-                        original_text = original_text.replace(url, new_url)
-                    except Exception as e:
-                        await message.reply_text(f"⚠️ Error processing folder {url}: {str(e)}")
-                        continue
-                elif file_id:
-                    try:
-                        new_file_id = await asyncio.get_event_loop().run_in_executor(
+                        new_url = f'https://drive.google.com/drive/folders/{new_id} {random_link}'
+                        processed_text = processed_text.replace(url, new_url)
+                        
+                    elif file_id:
+                        # Check permissions before copying
+                        if not check_permissions(drive_service, file_id):
+                            error_msg = f"⛔ Private File (Not Copied): {url}"
+                            error_messages.append(error_msg)
+                            processed_text = processed_text.replace(url, error_msg)
+                            continue
+                            
+                        # Copy the file
+                        new_id = await asyncio.get_event_loop().run_in_executor(
                             None, copy_file, drive_service, file_id, banned_items
                         )
+                        
+                        # Verify the copy was successful
+                        if not check_permissions(drive_service, new_id):
+                            error_msg = f"⛔ Couldn't Copy File (Permissions Lost): {url}"
+                            error_messages.append(error_msg)
+                            safe_delete(drive_service, new_id)
+                            processed_text = processed_text.replace(url, error_msg)
+                            continue
+                            
                         random_link = random.choice(SHORT_LINKS)
-                        new_url = f'https://drive.google.com/file/d/{new_file_id}/view?usp=sharing {random_link}'
-                        drive_links.append((url, new_url))
-                        original_text = original_text.replace(url, new_url)
-                    except Exception as e:
-                        await message.reply_text(f"⚠️ Error processing file {url}: {str(e)}")
-                        continue
+                        new_url = f'https://drive.google.com/file/d/{new_id}/view?usp=sharing {random_link}'
+                        processed_text = processed_text.replace(url, new_url)
+                        
+                except Exception as e:
+                    error_msg = f"⚠️ Error Processing: {url} - {str(e)}"
+                    error_messages.append(error_msg)
+                    if new_id:
+                        safe_delete(drive_service, new_id)
+                    processed_text = processed_text.replace(url, error_msg)
+                    continue
 
-            if drive_links:
-                last_pos = original_text.rfind(drive_links[-1][1]) + len(drive_links[-1][1])
-                final_text = original_text[:last_pos].strip()
-            else:
-                final_text = original_text
+            # Prepare final text with errors if any
+            final_text = processed_text
+            if error_messages:
+                final_text += "\n\n" + "\n".join(error_messages)
 
             filtered_entities = filter_entities(original_entities)
             valid_entities = validate_entity_positions(final_text, filtered_entities)
@@ -590,7 +655,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             final_text = ''
             valid_entities = []
 
-        # Rest of the function remains the same...
         send_args = {
             'chat_id': TARGET_CHANNEL,
             'disable_notification': True,
