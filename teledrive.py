@@ -11,7 +11,6 @@ import signal
 from datetime import datetime
 from aiohttp import web
 from telegram import Update, MessageEntity
-from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
@@ -516,7 +515,7 @@ def validate_entity_positions(text, entities):
     return valid_entities
 
 def filter_entities(entities):
-    """Filter to only supported formatting entities"""
+    """Filter to only basic formatting entities"""
     allowed_types = {
         MessageEntity.BOLD,
         MessageEntity.ITALIC,
@@ -524,81 +523,12 @@ def filter_entities(entities):
         MessageEntity.PRE,
         MessageEntity.UNDERLINE,
         MessageEntity.STRIKETHROUGH,
-        MessageEntity.TEXT_LINK,
-        MessageEntity.SPOILER
+        MessageEntity.TEXT_LINK
     }
     return [e for e in entities if e.type in allowed_types] if entities else []
 
-def apply_all_formatting(text, entities):
-    """Apply all Telegram formatting styles using HTML tags"""
-    if not text:
-        return text
-    
-    # First handle blockquotes separately since they're not a MessageEntity type
-    if ">" in text:
-        text = text.replace("&gt;", ">")
-        lines = text.split('\n')
-        formatted_lines = []
-        in_blockquote = False
-        
-        for line in lines:
-            if line.startswith('>'):
-                if not in_blockquote:
-                    formatted_lines.append('<blockquote>')
-                    in_blockquote = True
-                formatted_lines.append(line[1:].strip())
-            else:
-                if in_blockquote:
-                    formatted_lines.append('</blockquote>')
-                    in_blockquote = False
-                formatted_lines.append(line)
-        
-        if in_blockquote:
-            formatted_lines.append('</blockquote>')
-        
-        text = '\n'.join(formatted_lines)
-    
-    # Entity processing map (for received message entities)
-    entity_map = {
-        MessageEntity.BOLD: ('<b>', '</b>'),
-        MessageEntity.ITALIC: ('<i>', '</i>'),
-        MessageEntity.UNDERLINE: ('<u>', '</u>'),
-        MessageEntity.STRIKETHROUGH: ('<s>', '</s>'),
-        MessageEntity.SPOILER: ('<tg-spoiler>', '</tg-spoiler>'),
-        MessageEntity.CODE: ('<code>', '</code>'),
-        MessageEntity.PRE: ('<pre>', '</pre>'),
-        MessageEntity.TEXT_LINK: (lambda e: f'<a href="{e.url}">', '</a>')
-    }
-    
-    # Sort entities by offset (reversed for proper insertion)
-    sorted_entities = sorted(entities or [], key=lambda e: -e.offset)
-    
-    # Convert to list for character-level manipulation
-    text_parts = [text]
-    
-    for entity in sorted_entities:
-        if entity.type not in entity_map:
-            continue
-            
-        start_tag, end_tag = entity_map[entity.type]
-        if callable(start_tag):
-            start_tag = start_tag(entity)
-            
-        start = entity.offset
-        end = start + entity.length
-        
-        # Split the text at the entity boundaries
-        before = text_parts[0][:start]
-        content = text_parts[0][start:end]
-        after = text_parts[0][end:]
-        
-        # Rebuild with formatted content
-        text_parts = [before, start_tag, content, end_tag, after]
-    
-    # Reconstruct the formatted text
-    return ''.join(text_parts)
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle incoming messages with full formatting support"""
+    """Handle incoming messages"""
     message = update.message
     if not message or (message.text and message.text.startswith('/')):
         return
@@ -612,7 +542,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         banned_items = initialize_banned_items(drive_service)
 
         if original_text:
-            # Process Google Drive links
+            # Updated regex pattern to handle all Google Drive URL formats
             url_matches = list(re.finditer(
                 r'https?://(?:drive\.google\.com/(?:drive/folders/|folderview\?id=|file/d/|open\?id=|uc\?id=|mobile/folders/|mobile\?id=|.*[?&]id=|drive/u/\d+/mobile/folders/)|.*\.google\.com/open\?id=)[\w-]+[^\s>]*',
                 original_text
@@ -654,50 +584,46 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 final_text = original_text
 
-            # Process entities and apply formatting
             filtered_entities = filter_entities(original_entities)
             valid_entities = validate_entity_positions(final_text, filtered_entities)
-            formatted_text = apply_all_formatting(final_text, valid_entities)
         else:
-            formatted_text = ''
+            final_text = ''
+            valid_entities = []
 
-        # Send the message with all formatting
+        # Rest of the function remains the same...
         send_args = {
             'chat_id': TARGET_CHANNEL,
             'disable_notification': True,
-            'parse_mode': ParseMode.HTML
+            'caption': final_text,
+            'caption_entities': valid_entities
         }
 
         if message.photo:
-            send_args['caption'] = formatted_text
             await context.bot.send_photo(
                 photo=message.photo[-1].file_id,
                 **send_args
             )
         elif message.video:
-            send_args['caption'] = formatted_text
             await context.bot.send_video(
                 video=message.video.file_id,
                 **send_args
             )
         elif message.document:
-            send_args['caption'] = formatted_text
             await context.bot.send_document(
                 document=message.document.file_id,
                 **send_args
             )
         elif message.audio:
-            send_args['caption'] = formatted_text
             await context.bot.send_audio(
                 audio=message.audio.file_id,
                 **send_args
             )
         else:
             await context.bot.send_message(
-                text=formatted_text,
+                text=final_text,
+                entities=valid_entities,
                 disable_notification=True,
-                chat_id=TARGET_CHANNEL,
-                parse_mode=ParseMode.HTML
+                chat_id=TARGET_CHANNEL
             )
 
     except Exception as e:
