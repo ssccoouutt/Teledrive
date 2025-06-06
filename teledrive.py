@@ -534,6 +534,30 @@ def apply_all_formatting(text, entities):
     if not text:
         return text
     
+    # First handle blockquotes separately since they're not a MessageEntity type
+    if ">" in text:
+        text = text.replace("&gt;", ">")
+        lines = text.split('\n')
+        formatted_lines = []
+        in_blockquote = False
+        
+        for line in lines:
+            if line.startswith('>'):
+                if not in_blockquote:
+                    formatted_lines.append('<blockquote>')
+                    in_blockquote = True
+                formatted_lines.append(line[1:].strip())
+            else:
+                if in_blockquote:
+                    formatted_lines.append('</blockquote>')
+                    in_blockquote = False
+                formatted_lines.append(line)
+        
+        if in_blockquote:
+            formatted_lines.append('</blockquote>')
+        
+        text = '\n'.join(formatted_lines)
+    
     # Entity processing map (for received message entities)
     entity_map = {
         MessageEntity.BOLD: ('<b>', '</b>'),
@@ -572,16 +596,7 @@ def apply_all_formatting(text, entities):
         text_parts = [before, start_tag, content, end_tag, after]
     
     # Reconstruct the formatted text
-    formatted_text = ''.join(text_parts)
-    
-    # Add blockquote formatting if needed (not as an entity, but as HTML)
-    if "<blockquote>" in formatted_text.lower() or ">" in formatted_text:
-        formatted_text = formatted_text.replace("&gt;", ">").replace(">", "<blockquote>", 1)
-        if formatted_text.count("<blockquote>") > formatted_text.count("</blockquote>"):
-            formatted_text += "</blockquote>"
-    
-    return formatted_text
-
+    return ''.join(text_parts)
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle incoming messages with full formatting support"""
     message = update.message
