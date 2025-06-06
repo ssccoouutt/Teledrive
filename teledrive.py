@@ -11,6 +11,7 @@ import signal
 from datetime import datetime
 from aiohttp import web
 from telegram import Update, MessageEntity
+from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
@@ -477,7 +478,7 @@ def rename_files_and_folders(service, folder_id):
             break
 
 def validate_entity_positions(text, entities):
-    """Ensure entities align with UTF-16 character boundaries"""
+    """Ensure entities align with UTF-16 character boundaries with enhanced formatting support"""
     if not entities:
         return []
     
@@ -515,7 +516,7 @@ def validate_entity_positions(text, entities):
     return valid_entities
 
 def filter_entities(entities):
-    """Filter to only basic formatting entities"""
+    """Filter to all supported formatting entities with additional types"""
     allowed_types = {
         MessageEntity.BOLD,
         MessageEntity.ITALIC,
@@ -523,12 +524,62 @@ def filter_entities(entities):
         MessageEntity.PRE,
         MessageEntity.UNDERLINE,
         MessageEntity.STRIKETHROUGH,
-        MessageEntity.TEXT_LINK
+        MessageEntity.TEXT_LINK,
+        MessageEntity.SPOILER,
+        MessageEntity.BLOCKQUOTE
     }
     return [e for e in entities if e.type in allowed_types] if entities else []
 
+def apply_comprehensive_formatting(text, entities):
+    """Apply all Telegram formatting styles to text while preserving existing entities"""
+    if not text:
+        return text, entities
+    
+    # Process each entity type with proper nesting
+    entity_map = {
+        MessageEntity.BOLD: ('<b>', '</b>'),
+        MessageEntity.ITALIC: ('<i>', '</i>'),
+        MessageEntity.UNDERLINE: ('<u>', '</u>'),
+        MessageEntity.STRIKETHROUGH: ('<s>', '</s>'),
+        MessageEntity.SPOILER: ('<tg-spoiler>', '</tg-spoiler>'),
+        MessageEntity.CODE: ('<code>', '</code>'),
+        MessageEntity.PRE: ('<pre>', '</pre>'),
+        MessageEntity.BLOCKQUOTE: ('<blockquote>', '</blockquote>'),
+        MessageEntity.TEXT_LINK: (lambda e: f'<a href="{e.url}">', '</a>')
+    }
+    
+    # Sort entities by offset (reversed for proper insertion)
+    sorted_entities = sorted(entities or [], key=lambda e: -e.offset)
+    
+    # Convert to list for character-level manipulation
+    text_parts = [text]
+    
+    for entity in sorted_entities:
+        if entity.type not in entity_map:
+            continue
+            
+        start_tag, end_tag = entity_map[entity.type]
+        if callable(start_tag):
+            start_tag = start_tag(entity)
+            
+        start = entity.offset
+        end = start + entity.length
+        
+        # Split the text at the entity boundaries
+        before = text_parts[0][:start]
+        content = text_parts[0][start:end]
+        after = text_parts[0][end:]
+        
+        # Rebuild with formatted content
+        text_parts = [before, start_tag, content, end_tag, after]
+    
+    # Reconstruct the formatted text
+    formatted_text = ''.join(text_parts)
+    
+    return formatted_text, entities
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle incoming messages"""
+    """Handle incoming messages with enhanced formatting support"""
     message = update.message
     if not message or (message.text and message.text.startswith('/')):
         return
@@ -542,7 +593,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         banned_items = initialize_banned_items(drive_service)
 
         if original_text:
-            # Updated regex pattern to handle all Google Drive URL formats
+            # Process Google Drive links (unchanged)
             url_matches = list(re.finditer(
                 r'https?://(?:drive\.google\.com/(?:drive/folders/|folderview\?id=|file/d/|open\?id=|uc\?id=|mobile/folders/|mobile\?id=|.*[?&]id=|drive/u/\d+/mobile/folders/)|.*\.google\.com/open\?id=)[\w-]+[^\s>]*',
                 original_text
@@ -584,18 +635,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 final_text = original_text
 
+            # Apply comprehensive formatting
             filtered_entities = filter_entities(original_entities)
             valid_entities = validate_entity_positions(final_text, filtered_entities)
+            formatted_text, _ = apply_comprehensive_formatting(final_text, valid_entities)
         else:
-            final_text = ''
+            formatted_text = ''
             valid_entities = []
 
-        # Rest of the function remains the same...
+        # Send the message with all formatting preserved
         send_args = {
             'chat_id': TARGET_CHANNEL,
             'disable_notification': True,
-            'caption': final_text,
-            'caption_entities': valid_entities
+            'caption': formatted_text if formatted_text else None,
+            'caption_entities': valid_entities if formatted_text else None,
+            'parse_mode': ParseMode.HTML
         }
 
         if message.photo:
@@ -620,10 +674,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         else:
             await context.bot.send_message(
-                text=final_text,
+                text=formatted_text,
                 entities=valid_entities,
                 disable_notification=True,
-                chat_id=TARGET_CHANNEL
+                chat_id=TARGET_CHANNEL,
+                parse_mode=ParseMode.HTML
             )
 
     except Exception as e:
