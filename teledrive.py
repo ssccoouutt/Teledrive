@@ -526,7 +526,7 @@ def filter_entities(entities):
         MessageEntity.STRIKETHROUGH,
         MessageEntity.TEXT_LINK,
         MessageEntity.SPOILER,
-        MessageEntity.BLOCKQUOTE,  # Now supported in v21.1
+        MessageEntity.BLOCKQUOTE,
     }
     return [e for e in entities if e.type in allowed_types] if entities else []
 
@@ -544,7 +544,7 @@ def apply_comprehensive_formatting(text, entities):
         MessageEntity.SPOILER: ('<tg-spoiler>', '</tg-spoiler>'),
         MessageEntity.CODE: ('<code>', '</code>'),
         MessageEntity.PRE: ('<pre>', '</pre>'),
-        MessageEntity.BLOCKQUOTE: ('<blockquote>', '</blockquote>'),  # Now supported
+        MessageEntity.BLOCKQUOTE: ('<blockquote>', '</blockquote>'),
         MessageEntity.TEXT_LINK: (lambda e: f'<a href="{e.url}">', '</a>')
     }
     
@@ -593,7 +593,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         banned_items = initialize_banned_items(drive_service)
 
         if original_text:
-            # Process Google Drive links (unchanged)
+            # Process Google Drive links
             url_matches = list(re.finditer(
                 r'https?://(?:drive\.google\.com/(?:drive/folders/|folderview\?id=|file/d/|open\?id=|uc\?id=|mobile/folders/|mobile\?id=|.*[?&]id=|drive/u/\d+/mobile/folders/)|.*\.google\.com/open\?id=)[\w-]+[^\s>]*',
                 original_text
