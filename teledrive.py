@@ -526,7 +526,7 @@ def filter_entities(entities):
         MessageEntity.STRIKETHROUGH,
         MessageEntity.TEXT_LINK,
         MessageEntity.SPOILER,
-        MessageEntity.BLOCKQUOTE
+        MessageEntity.BLOCKQUOTE,  # Now supported in v21.1
     }
     return [e for e in entities if e.type in allowed_types] if entities else []
 
@@ -544,7 +544,7 @@ def apply_comprehensive_formatting(text, entities):
         MessageEntity.SPOILER: ('<tg-spoiler>', '</tg-spoiler>'),
         MessageEntity.CODE: ('<code>', '</code>'),
         MessageEntity.PRE: ('<pre>', '</pre>'),
-        MessageEntity.BLOCKQUOTE: ('<blockquote>', '</blockquote>'),
+        MessageEntity.BLOCKQUOTE: ('<blockquote>', '</blockquote>'),  # Now supported
         MessageEntity.TEXT_LINK: (lambda e: f'<a href="{e.url}">', '</a>')
     }
     
