@@ -521,44 +521,17 @@ def filter_entities(entities):
         MessageEntity.UNDERLINE,
         MessageEntity.STRIKETHROUGH,
         MessageEntity.TEXT_LINK,
-        MessageEntity.SPOILER
+        MessageEntity.SPOILER,
+        "blockquote"
     }
-    return [e for e in entities if e.type in allowed_types] if entities else []
+    return [e for e in entities if getattr(e, 'type', None) in allowed_types] if entities else []
 
 def apply_formatting(text, entities):
-    """Apply all formatting with proper nesting and blockquote support"""
+    """Apply all formatting with proper nesting"""
     if not text:
         return text
-
-    # First handle blockquotes (lines starting with >)
-    if ">" in text:
-        text = text.replace("&gt;", ">")  # Unescape HTML entities first
-        lines = text.split('\n')
-        formatted_lines = []
-        in_blockquote = False
-        
-        for line in lines:
-            stripped_line = line.lstrip()
-            if stripped_line.startswith('>'):
-                if not in_blockquote:
-                    formatted_lines.append('<blockquote>')
-                    in_blockquote = True
-                # Preserve original indentation before the >
-                indent = line[:line.index('>')]
-                content = line[line.index('>')+1:].strip()
-                formatted_lines.append(f"{indent}{content}")
-            else:
-                if in_blockquote:
-                    formatted_lines.append('</blockquote>')
-                    in_blockquote = False
-                formatted_lines.append(line)
-        
-        if in_blockquote:
-            formatted_lines.append('</blockquote>')
-        
-        text = '\n'.join(formatted_lines)
-
-    # Convert to list for character-level manipulation of other entities
+    
+    # Convert to list for character-level manipulation
     chars = list(text)
     text_length = len(chars)
     
@@ -574,11 +547,12 @@ def apply_formatting(text, entities):
         MessageEntity.SPOILER: ('<tg-spoiler>', '</tg-spoiler>'),
         MessageEntity.CODE: ('<code>', '</code>'),
         MessageEntity.PRE: ('<pre>', '</pre>'),
-        MessageEntity.TEXT_LINK: (lambda e: f'<a href="{e.url}">', '</a>')
+        MessageEntity.TEXT_LINK: (lambda e: f'<a href="{e.url}">', '</a>'),
+        "blockquote": ('<blockquote>', '</blockquote>')
     }
     
     for entity in sorted_entities:
-        entity_type = entity.type
+        entity_type = getattr(entity, 'type', None)
         if entity_type not in entity_tags:
             continue
             
@@ -599,14 +573,39 @@ def apply_formatting(text, entities):
         after = ''.join(chars[end:])
         
         # Special handling for blockquotes to prevent nesting issues
-        if '<blockquote>' in content or '</blockquote>' in content:
-            content = content.replace('<blockquote>', '').replace('</blockquote>', '')
+        if entity_type == "blockquote":
+            content = content.replace('<b>', '').replace('</b>', '')
+            content = content.replace('<i>', '').replace('</i>', '')
         
         chars = list(before + start_tag + content + end_tag + after)
         text_length = len(chars)
     
-    # Final HTML escaping (except for our tags)
+    # Handle manual blockquotes (lines starting with >)
     formatted_text = ''.join(chars)
+    if ">" in formatted_text:
+        formatted_text = formatted_text.replace("&gt;", ">")
+        lines = formatted_text.split('\n')
+        formatted_lines = []
+        in_blockquote = False
+        
+        for line in lines:
+            if line.startswith('>'):
+                if not in_blockquote:
+                    formatted_lines.append('<blockquote>')
+                    in_blockquote = True
+                formatted_lines.append(line[1:].strip())
+            else:
+                if in_blockquote:
+                    formatted_lines.append('</blockquote>')
+                    in_blockquote = False
+                formatted_lines.append(line)
+        
+        if in_blockquote:
+            formatted_lines.append('</blockquote>')
+        
+        formatted_text = '\n'.join(formatted_lines)
+    
+    # Final HTML escaping (except for our tags)
     formatted_text = formatted_text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
     
     # Re-insert our HTML tags
