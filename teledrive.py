@@ -477,6 +477,7 @@ def rename_files_and_folders(service, folder_id):
             logger.error(f"Error listing files for renaming: {str(e)}")
             break
 
+# ================== NEW FORMATTING FUNCTIONS ==================
 def adjust_entity_offsets(text, entities):
     """Convert UTF-16 based offsets to proper character positions"""
     if not entities:
@@ -526,7 +527,7 @@ def filter_entities(entities):
     return [e for e in entities if e.type in allowed_types] if entities else []
 
 def apply_formatting(text, entities):
-    """Apply all formatting with proper nesting"""
+    """Apply all formatting with proper nesting and blockquote support"""
     if not text:
         return text
     
@@ -550,10 +551,11 @@ def apply_formatting(text, entities):
     }
     
     for entity in sorted_entities:
-        if entity.type not in entity_tags:
+        entity_type = entity.type
+        if entity_type not in entity_tags:
             continue
             
-        start_tag, end_tag = entity_tags[entity.type]
+        start_tag, end_tag = entity_tags[entity_type]
         if callable(start_tag):
             start_tag = start_tag(entity)
             
@@ -606,17 +608,21 @@ def apply_formatting(text, entities):
         formatted_text = formatted_text.replace(f'&lt;{tag}&gt;', f'<{tag}>').replace(f'&lt;/{tag}&gt;', f'</{tag}>')
     
     return formatted_text
+# ================== END OF NEW FORMATTING FUNCTIONS ==================
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle incoming messages with perfect formatting"""
-    try:
-        message = update.message
-        if not message or (message.text and message.text.startswith('/')):
-            return
+    """Handle incoming messages with perfect formatting and blockquote support"""
+    message = update.message
+    if not message or (message.text and message.text.startswith('/')):
+        return
 
-        original_text = message.caption or message.text or ''
-        original_entities = message.caption_entities if message.caption else message.entities
-        drive_links = []
+    original_text = message.caption or message.text or ''
+    original_entities = message.caption_entities if message.caption else message.entities
+    drive_links = []
+
+    try:
+        drive_service = get_drive_service()
+        banned_items = initialize_banned_items(drive_service)
 
         if original_text:
             # Process Google Drive links
@@ -633,7 +639,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if folder_id:
                     try:
                         new_folder_id = await asyncio.get_event_loop().run_in_executor(
-                            None, copy_folder, get_drive_service(), folder_id, initialize_banned_items(get_drive_service())
+                            None, copy_folder, drive_service, folder_id, banned_items
                         )
                         random_link = random.choice(SHORT_LINKS)
                         new_url = f'https://drive.google.com/drive/folders/{new_folder_id} {random_link}'
@@ -645,7 +651,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 elif file_id:
                     try:
                         new_file_id = await asyncio.get_event_loop().run_in_executor(
-                            None, copy_file, get_drive_service(), file_id, initialize_banned_items(get_drive_service())
+                            None, copy_file, drive_service, file_id, banned_items
                         )
                         random_link = random.choice(SHORT_LINKS)
                         new_url = f'https://drive.google.com/file/d/{new_file_id}/view?usp=sharing {random_link}'
@@ -655,10 +661,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         await message.reply_text(f"⚠️ Error processing file {url}: {str(e)}")
                         continue
 
-            # Process entities with proper character counting
+            if drive_links:
+                last_pos = original_text.rfind(drive_links[-1][1]) + len(drive_links[-1][1])
+                final_text = original_text[:last_pos].strip()
+            else:
+                final_text = original_text
+
+            # Process entities with perfect formatting
             filtered_entities = filter_entities(original_entities)
-            adjusted_entities = adjust_entity_offsets(original_text, filtered_entities)
-            formatted_text = apply_formatting(original_text, adjusted_entities)
+            adjusted_entities = adjust_entity_offsets(final_text, filtered_entities)
+            formatted_text = apply_formatting(final_text, adjusted_entities)
         else:
             formatted_text = ''
 
@@ -670,42 +682,42 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         }
 
         if message.photo:
+            send_args['caption'] = formatted_text
             await context.bot.send_photo(
                 photo=message.photo[-1].file_id,
-                caption=formatted_text,
                 **send_args
             )
         elif message.video:
+            send_args['caption'] = formatted_text
             await context.bot.send_video(
                 video=message.video.file_id,
-                caption=formatted_text,
                 **send_args
             )
         elif message.document:
+            send_args['caption'] = formatted_text
             await context.bot.send_document(
                 document=message.document.file_id,
-                caption=formatted_text,
                 **send_args
             )
         elif message.audio:
+            send_args['caption'] = formatted_text
             await context.bot.send_audio(
                 audio=message.audio.file_id,
-                caption=formatted_text,
                 **send_args
             )
         else:
             await context.bot.send_message(
                 text=formatted_text,
-                **send_args
+                disable_notification=True,
+                chat_id=TARGET_CHANNEL,
+                parse_mode=ParseMode.HTML
             )
 
     except Exception as e:
-        logger.error(f"Error processing message: {str(e)}", exc_info=True)
-        if update.effective_chat:
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text=f"⚠️ Error processing message: {str(e)[:200]}"
-            )
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=f"⚠️ Processing error: {str(e)[:200]}"
+        )
 
 async def ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Ban a file or folder from being processed"""
