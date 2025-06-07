@@ -477,7 +477,6 @@ def rename_files_and_folders(service, folder_id):
             logger.error(f"Error listing files for renaming: {str(e)}")
             break
 
-# ================== NEW FORMATTING FUNCTIONS ==================
 def adjust_entity_offsets(text, entities):
     """Convert UTF-16 based offsets to proper character positions"""
     if not entities:
@@ -501,6 +500,31 @@ def adjust_entity_offsets(text, entities):
         
         new_entity = MessageEntity(
             type=entity.type,
+            offset=start,
+            length=end - start,
+            url=entity.url,
+            user=entity.user,
+            language=entity.language,
+            custom_emoji_id=entity.custom_emoji_id
+        )
+        adjusted_entities.append(new_entity)
+    
+    return adjusted_entities
+
+def filter_entities(entities):
+    """Filter to only supported formatting entities"""
+    allowed_types = {
+        MessageEntity.BOLD,
+        MessageEntity.ITALIC,
+        MessageEntity.CODE,
+        MessageEntity.PRE,
+        MessageEntity.UNDERLINE,
+        MessageEntity.STRIKETHROUGH,
+        MessageEntity.TEXT_LINK,
+        MessageEntity.SPOILER
+    }
+    return [e for e in entities if e.type in allowed_types] if entities else []
+
 def apply_formatting(text, entities):
     """Apply all formatting with proper nesting and blockquote support"""
     if not text:
@@ -590,32 +614,7 @@ def apply_formatting(text, entities):
     for tag in html_tags:
         formatted_text = formatted_text.replace(f'&lt;{tag}&gt;', f'<{tag}>').replace(f'&lt;/{tag}&gt;', f'</{tag}>')
     
-    return formatted_text            offset=start,
-            length=end - start,
-            url=entity.url,
-            user=entity.user,
-            language=entity.language,
-            custom_emoji_id=entity.custom_emoji_id
-        )
-        adjusted_entities.append(new_entity)
-    
-    return adjusted_entities
-
-def filter_entities(entities):
-    """Filter to only supported formatting entities"""
-    allowed_types = {
-        MessageEntity.BOLD,
-        MessageEntity.ITALIC,
-        MessageEntity.CODE,
-        MessageEntity.PRE,
-        MessageEntity.UNDERLINE,
-        MessageEntity.STRIKETHROUGH,
-        MessageEntity.TEXT_LINK,
-        MessageEntity.SPOILER
-    }
-    return [e for e in entities if e.type in allowed_types] if entities else []
-
-
+    return formatted_text
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle incoming messages with perfect formatting and blockquote support"""
