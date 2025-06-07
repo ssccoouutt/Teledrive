@@ -517,21 +517,40 @@ def filter_entities(entities):
     allowed_types = {
         MessageEntity.BOLD,
         MessageEntity.ITALIC,
-        MessageEntity.CODE,
-        MessageEntity.PRE,
-        MessageEntity.UNDERLINE,
-        MessageEntity.STRIKETHROUGH,
-        MessageEntity.TEXT_LINK,
-        MessageEntity.SPOILER
-    }
-    return [e for e in entities if e.type in allowed_types] if entities else []
-
 def apply_formatting(text, entities):
     """Apply all formatting with proper nesting and blockquote support"""
     if not text:
         return text
-    
-    # Convert to list for character-level manipulation
+
+    # First handle blockquotes (lines starting with >)
+    if ">" in text:
+        text = text.replace("&gt;", ">")  # Unescape HTML entities first
+        lines = text.split('\n')
+        formatted_lines = []
+        in_blockquote = False
+        
+        for line in lines:
+            stripped_line = line.lstrip()
+            if stripped_line.startswith('>'):
+                if not in_blockquote:
+                    formatted_lines.append('<blockquote>')
+                    in_blockquote = True
+                # Preserve original indentation before the >
+                indent = line[:line.index('>')]
+                content = line[line.index('>')+1:].strip()
+                formatted_lines.append(f"{indent}{content}")
+            else:
+                if in_blockquote:
+                    formatted_lines.append('</blockquote>')
+                    in_blockquote = False
+                formatted_lines.append(line)
+        
+        if in_blockquote:
+            formatted_lines.append('</blockquote>')
+        
+        text = '\n'.join(formatted_lines)
+
+    # Convert to list for character-level manipulation of other entities
     chars = list(text)
     text_length = len(chars)
     
@@ -571,35 +590,15 @@ def apply_formatting(text, entities):
         content = ''.join(chars[start:end])
         after = ''.join(chars[end:])
         
+        # Special handling for blockquotes to prevent nesting issues
+        if '<blockquote>' in content or '</blockquote>' in content:
+            content = content.replace('<blockquote>', '').replace('</blockquote>', '')
+        
         chars = list(before + start_tag + content + end_tag + after)
         text_length = len(chars)
     
-    # Handle manual blockquotes (lines starting with >)
-    formatted_text = ''.join(chars)
-    if ">" in formatted_text:
-        formatted_text = formatted_text.replace("&gt;", ">")
-        lines = formatted_text.split('\n')
-        formatted_lines = []
-        in_blockquote = False
-        
-        for line in lines:
-            if line.startswith('>'):
-                if not in_blockquote:
-                    formatted_lines.append('<blockquote>')
-                    in_blockquote = True
-                formatted_lines.append(line[1:].strip())
-            else:
-                if in_blockquote:
-                    formatted_lines.append('</blockquote>')
-                    in_blockquote = False
-                formatted_lines.append(line)
-        
-        if in_blockquote:
-            formatted_lines.append('</blockquote>')
-        
-        formatted_text = '\n'.join(formatted_lines)
-    
     # Final HTML escaping (except for our tags)
+    formatted_text = ''.join(chars)
     formatted_text = formatted_text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
     
     # Re-insert our HTML tags
@@ -607,8 +606,32 @@ def apply_formatting(text, entities):
     for tag in html_tags:
         formatted_text = formatted_text.replace(f'&lt;{tag}&gt;', f'<{tag}>').replace(f'&lt;/{tag}&gt;', f'</{tag}>')
     
-    return formatted_text
-# ================== END OF NEW FORMATTING FUNCTIONS ==================
+    return formatted_text        MessageEntity.CODE,
+        MessageEntity.PRE,
+        MessageEntity.UNDERLINE,
+        MessageEntity.STRIKETHROUGH,
+        MessageEntity.TEXT_LINK,
+        MessageEntity.SPOILER
+    }
+    return [e for e in entities if e.type in allowed_types] if entities else []
+
+def apply_formatting(text, entities):
+    """Apply all formatting with proper nesting and blockquote support"""
+    if not text:
+        return text
+    
+    # Convert to list for character-level manipulation
+    chars = list(text)
+    text_length = len(chars)
+    
+    # Sort entities by offset (reversed for proper insertion)
+    sorted_entities = sorted(entities or [], key=lambda e: -e.offset)
+    
+    # Entity processing map
+    entity_tags = {
+        MessageEntity.BOLD: ('<b>', '</b>'),
+        MessageEntity.ITALIC: ('<i>', '</i>'),
+
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle incoming messages with perfect formatting and blockquote support"""
