@@ -21,7 +21,7 @@ from googleapiclient.errors import HttpError
 from google_auth_oauthlib.flow import InstalledAppFlow
 
 # Configuration
-BOT_TOKEN = "7846379611:AAGzu4KM-Aq699Q8aHNt29t0YbTnDKbkXbI"
+BOT_TOKEN = "7846379611:AAHYshaf3fYSh44JXQEnfttrggq4-OrP5AQ"
 TOKEN_PATH = 'token.json'
 CREDENTIALS_PATH = 'credentials.json'
 PHASE2_SOURCE = '1ixJU6s6bKbzIdsbjKDKrZYLt1nl_TSul'
