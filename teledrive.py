@@ -103,18 +103,15 @@ def filter_entities(entities):
     return [e for e in entities if getattr(e, 'type', None) in allowed_types] if entities else []
 
 def apply_formatting(text, entities):
-    """Apply all formatting with proper nesting"""
+    """Apply all formatting with proper nesting and escaping"""
     if not text:
         return text
-    
-    # Convert to list for character-level manipulation
+
+    # First handle all Telegram entities
     chars = list(text)
     text_length = len(chars)
-    
-    # Sort entities by offset (reversed for proper insertion)
     sorted_entities = sorted(entities or [], key=lambda e: -e.offset)
     
-    # Entity processing map
     entity_tags = {
         MessageEntity.BOLD: ('<b>', '</b>'),
         MessageEntity.ITALIC: ('<i>', '</i>'),
@@ -125,7 +122,7 @@ def apply_formatting(text, entities):
         MessageEntity.PRE: ('<pre>', '</pre>'),
         MessageEntity.TEXT_LINK: (lambda e: f'<a href="{e.url}">', '</a>'),
     }
-    
+
     for entity in sorted_entities:
         entity_type = getattr(entity, 'type', None)
         if entity_type not in entity_tags:
@@ -138,20 +135,21 @@ def apply_formatting(text, entities):
         start = entity.offset
         end = start + entity.length
         
-        # Validate positions
         if start >= text_length or end > text_length:
             continue
             
-        # Apply formatting
         before = ''.join(chars[:start])
         content = ''.join(chars[start:end])
         after = ''.join(chars[end:])
         
+        # Clean content before applying tags
+        content = content.replace('<', '&lt;').replace('>', '&gt;')
         chars = list(before + start_tag + content + end_tag + after)
         text_length = len(chars)
-    
-    # Handle manual blockquotes (lines starting with >)
+
     formatted_text = ''.join(chars)
+    
+    # Then handle blockquotes from > characters
     if ">" in formatted_text:
         formatted_text = formatted_text.replace("&gt;", ">")
         lines = formatted_text.split('\n')
@@ -176,12 +174,16 @@ def apply_formatting(text, entities):
         formatted_text = '\n'.join(formatted_lines)
     
     # Final HTML escaping (except for our tags)
-    formatted_text = formatted_text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+    formatted_text = formatted_text.replace('&', '&amp;')
     
     # Re-insert our HTML tags
     html_tags = ['b', 'i', 'u', 's', 'code', 'pre', 'a', 'tg-spoiler', 'blockquote']
     for tag in html_tags:
         formatted_text = formatted_text.replace(f'&lt;{tag}&gt;', f'<{tag}>').replace(f'&lt;/{tag}&gt;', f'</{tag}>')
+    
+    # Clean up any malformed tags
+    formatted_text = re.sub(r'<([a-z]+)>\s*</\1>', '', formatted_text)  # Remove empty tags
+    formatted_text = re.sub(r'<b>(https?://[^<]+)</b>', r'\1', formatted_text)  # Don't bold URLs
     
     return formatted_text
 
