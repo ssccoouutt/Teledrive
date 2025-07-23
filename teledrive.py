@@ -26,7 +26,6 @@ TOKEN_PATH = 'token.json'
 CREDENTIALS_PATH = 'credentials.json'
 PHASE2_SOURCE = '1ixJU6s6bKbzIdsbjKDKrZYLt1nl_TSul'
 PHASE3_SOURCE = '1iM6ghIcYsx1gIvfdjm-HjCRW3MWy0JCP'
-SHORT_LINKS = ["rb.gy/cd8ugy", "bit.ly/3UcvhlA", "t.ly/CfcVB", "cutt.ly/Kee3oiLO"]
 TARGET_CHANNEL = "@techworld196"
 BANNED_FILE_ID = '1r2BpwG9isOkKjL5tYj3WqqiF5w4oWpCY'
 SCOPES = ['https://www.googleapis.com/auth/drive']
@@ -744,8 +743,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         new_folder_id = await asyncio.get_event_loop().run_in_executor(
                             None, copy_folder, drive_service, folder_id, banned_data
                         )
-                        random_link = random.choice(SHORT_LINKS)
-                        new_url = f'https://drive.google.com/drive/folders/{new_folder_id} {random_link}'
+                        new_url = f'https://drive.google.com/drive/folders/{new_folder_id}\n\n' \
+                                 '<blockquote>➤ Spread The Value</blockquote>\n\n' \
+                                 '<b>Join Tech Zone 💀:</b>\n' \
+                                 'https://whatsapp.com/channel/0029VacnMpyHrDZldKwMod38\n' \
+                                 '<b>Join LWZ Official 🗿:</b>\n' \
+                                 'https://whatsapp.com/channel/0029VagERwvAzNc2E9gpkL3U'
                         drive_links.append((url, new_url))
                         original_text = original_text.replace(url, new_url)
                     except Exception as e:
@@ -756,8 +759,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         new_file_id = await asyncio.get_event_loop().run_in_executor(
                             None, copy_file, drive_service, file_id, banned_data
                         )
-                        random_link = random.choice(SHORT_LINKS)
-                        new_url = f'https://drive.google.com/file/d/{new_file_id}/view?usp=sharing {random_link}'
+                        new_url = f'https://drive.google.com/file/d/{new_file_id}/view?usp=sharing\n\n' \
+                                 '<blockquote>➤ Spread The Value</blockquote>\n\n' \
+                                 '<b>Join Tech Zone 💀:</b>\n' \
+                                 'https://whatsapp.com/channel/0029VacnMpyHrDZldKwMod38\n' \
+                                 '<b>Join LWZ Official 🗿:</b>\n' \
+                                 'https://whatsapp.com/channel/0029VagERwvAzNc2E9gpkL3U'
                         drive_links.append((url, new_url))
                         original_text = original_text.replace(url, new_url)
                     except Exception as e:
