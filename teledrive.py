@@ -54,7 +54,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ====================== TEXT FORMATTING FUNCTIONS ======================
 def adjust_entity_offsets(text, entities):
     """Convert UTF-16 based offsets to proper character positions"""
     if not entities:
@@ -193,7 +192,6 @@ def apply_formatting(text, entities):
     
     return formatted_text
 
-# ====================== GOOGLE DRIVE FUNCTIONS ======================
 def get_drive_service():
     """Initialize and return Google Drive service"""
     creds = None
