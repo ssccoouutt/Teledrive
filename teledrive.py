@@ -1,7 +1,6 @@
 import re
 import os
 import io
-import random
 import asyncio
 import traceback
 import time
@@ -743,12 +742,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         new_folder_id = await asyncio.get_event_loop().run_in_executor(
                             None, copy_folder, drive_service, folder_id, banned_data
                         )
-                        new_url = f'https://drive.google.com/drive/folders/{new_folder_id}\n\n' \
-                                 '<blockquote>➤ Spread The Value</blockquote>\n\n' \
-                                 '<b>Join Tech Zone 💀:</b>\n' \
-                                 'https://whatsapp.com/channel/0029VacnMpyHrDZldKwMod38\n' \
-                                 '<b>Join LWZ Official 🗿:</b>\n' \
-                                 'https://whatsapp.com/channel/0029VagERwvAzNc2E9gpkL3U'
+                        new_url = (
+                            f'https://drive.google.com/drive/folders/{new_folder_id}\n\n'
+                            '<blockquote>➤ Spread The Value</blockquote>\n\n'
+                            '<b>Join Tech Zone 💀</b>\n'
+                            'https://whatsapp.com/channel/0029VacnMpyHrDZldKwMod38\n'
+                            '<b>Join LWZ Official 🗿</b>\n'
+                            'https://whatsapp.com/channel/0029VagERwvAzNc2E9gpkL3U'
+                        )
                         drive_links.append((url, new_url))
                         original_text = original_text.replace(url, new_url)
                     except Exception as e:
@@ -759,12 +760,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         new_file_id = await asyncio.get_event_loop().run_in_executor(
                             None, copy_file, drive_service, file_id, banned_data
                         )
-                        new_url = f'https://drive.google.com/file/d/{new_file_id}/view?usp=sharing\n\n' \
-                                 '<blockquote>➤ Spread The Value</blockquote>\n\n' \
-                                 '<b>Join Tech Zone 💀:</b>\n' \
-                                 'https://whatsapp.com/channel/0029VacnMpyHrDZldKwMod38\n' \
-                                 '<b>Join LWZ Official 🗿:</b>\n' \
-                                 'https://whatsapp.com/channel/0029VagERwvAzNc2E9gpkL3U'
+                        new_url = (
+                            f'https://drive.google.com/file/d/{new_file_id}/view?usp=sharing\n\n'
+                            '<blockquote>➤ Spread The Value</blockquote>\n\n'
+                            '<b>Join Tech Zone 💀</b>\n'
+                            'https://whatsapp.com/channel/0029VacnMpyHrDZldKwMod38\n'
+                            '<b>Join LWZ Official 🗿</b>\n'
+                            'https://whatsapp.com/channel/0029VagERwvAzNc2E9gpkL3U'
+                        )
                         drive_links.append((url, new_url))
                         original_text = original_text.replace(url, new_url)
                     except Exception as e:
