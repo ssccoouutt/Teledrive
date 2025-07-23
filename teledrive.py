@@ -907,30 +907,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-
-
-
-
-modify and enhance the script such that for /ban [Google Drive file link]
-the file's exact size in bytes and file type should be saved in database file instead of saving by name. (create a different section in same banned.txt file separated by a new line). in simple words
-
-/ban [file/folder name]
-banned by name
-
-
-/ban [file link]
-banned by size + file type
-
-
-so when Copying any task both of these should be skipped (by name and also be size+type)
-
-
-
-
-
-and also add one more section in database file separated by new line for command /change [old] to [new]
-
-
-this Command is for renaming files/folders .i.e 
-old text in files/folders will be renamed by new by search and replace
