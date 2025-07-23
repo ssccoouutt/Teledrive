@@ -56,6 +56,168 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# ====================== TEXT FORMATTING FUNCTIONS ======================
+def filter_entities(entities):
+    """Filter to only supported formatting entities"""
+    allowed_types = {
+        MessageEntity.BOLD,
+        MessageEntity.ITALIC,
+        MessageEntity.CODE,
+        MessageEntity.PRE,
+        MessageEntity.UNDERLINE,
+        MessageEntity.STRIKETHROUGH,
+        MessageEntity.TEXT_LINK,
+        MessageEntity.SPOILER,
+        MessageEntity.TEXT_MENTION,
+        MessageEntity.CUSTOM_EMOJI,
+        "blockquote"
+    }
+    return [e for e in entities if getattr(e, 'type', None) in allowed_types] if entities else []
+
+def adjust_entity_offsets(text, entities):
+    """Convert UTF-16 based offsets to proper character positions"""
+    if not entities:
+        return []
+    
+    # Create mapping between UTF-16 positions and character positions
+    utf16_to_char = {}
+    char_pos = 0
+    utf16_pos = 0
+    
+    for char in text:
+        utf16_to_char[utf16_pos] = char_pos
+        utf16_pos += len(char.encode('utf-16-le')) // 2
+        char_pos += 1
+    
+    # Adjust entity offsets
+    adjusted_entities = []
+    for entity in entities:
+        start = utf16_to_char.get(entity.offset, entity.offset)
+        end = utf16_to_char.get(entity.offset + entity.length, entity.offset + entity.length)
+        
+        new_entity = MessageEntity(
+            type=entity.type,
+            offset=start,
+            length=end - start,
+            url=entity.url,
+            user=entity.user,
+            language=entity.language,
+            custom_emoji_id=entity.custom_emoji_id
+        )
+        adjusted_entities.append(new_entity)
+    
+    return adjusted_entities
+
+def apply_formatting(text, entities):
+    """Apply all formatting with proper nesting and overlapping support"""
+    if not text:
+        return text
+    
+    # Convert to list for character-level manipulation
+    chars = list(text)
+    
+    # Sort entities by start position (earlier first) and length (longer first)
+    sorted_entities = sorted(entities or [], key=lambda e: (e.offset, -e.length))
+    
+    # Entity processing map
+    entity_tags = {
+        MessageEntity.BOLD: ('<b>', '</b>'),
+        MessageEntity.ITALIC: ('<i>', '</i>'),
+        MessageEntity.UNDERLINE: ('<u>', '</u>'),
+        MessageEntity.STRIKETHROUGH: ('<s>', '</s>'),
+        MessageEntity.SPOILER: ('<tg-spoiler>', '</tg-spoiler>'),
+        MessageEntity.CODE: ('<code>', '</code>'),
+        MessageEntity.PRE: ('<pre>', '</pre>'),
+        MessageEntity.TEXT_LINK: (lambda e: f'<a href="{e.url}">', '</a>'),
+        MessageEntity.TEXT_MENTION: (lambda e: f'<a href="tg://user?id={e.user.id}">', '</a>'),
+        MessageEntity.CUSTOM_EMOJI: (lambda e: f'<tg-emoji emoji-id="{e.custom_emoji_id}">', '</tg-emoji>'),
+        "blockquote": ('<blockquote>', '</blockquote>')
+    }
+    
+    # Apply formatting from innermost to outermost
+    stack = []
+    result = []
+    i = 0
+    n = len(chars)
+    
+    while i < n:
+        # Check if current position is the start of any entity
+        starts = []
+        for entity in sorted_entities:
+            if entity.offset == i:
+                starts.append(entity)
+        
+        # Check if current position is the end of any entity
+        ends = []
+        for entity, start_pos in stack:
+            end_pos = start_pos + entity.length
+            if end_pos == i:
+                ends.append(entity)
+        
+        # First close ending entities (LIFO order)
+        for entity in reversed(ends):
+            _, tag = entity_tags.get(entity.type, ('', ''))
+            if callable(tag):
+                tag = tag(entity)
+            result.append(tag)
+            # Remove from stack
+            stack = [item for item in stack if item[0] != entity]
+        
+        # Then open new entities
+        for entity in starts:
+            tag, _ = entity_tags.get(entity.type, ('', ''))
+            if callable(tag):
+                tag = tag(entity)
+            result.append(tag)
+            stack.append((entity, i))
+        
+        # Add the current character
+        result.append(chars[i])
+        i += 1
+    
+    # Close any remaining open tags
+    for entity, _ in reversed(stack):
+        _, tag = entity_tags.get(entity.type, ('', ''))
+        if callable(tag):
+            tag = tag(entity)
+        result.append(tag)
+    
+    # Handle manual blockquotes (lines starting with >)
+    formatted_text = ''.join(result)
+    if ">" in formatted_text:
+        formatted_text = formatted_text.replace("&gt;", ">")
+        lines = formatted_text.split('\n')
+        formatted_lines = []
+        in_blockquote = False
+        
+        for line in lines:
+            if line.startswith('>'):
+                if not in_blockquote:
+                    formatted_lines.append('<blockquote>')
+                    in_blockquote = True
+                formatted_lines.append(line[1:].strip())
+            else:
+                if in_blockquote:
+                    formatted_lines.append('</blockquote>')
+                    in_blockquote = False
+                formatted_lines.append(line)
+        
+        if in_blockquote:
+            formatted_lines.append('</blockquote>')
+        
+        formatted_text = '\n'.join(formatted_lines)
+    
+    # Final HTML escaping (except for our tags)
+    formatted_text = formatted_text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+    
+    # Re-insert our HTML tags
+    html_tags = ['b', 'i', 'u', 's', 'code', 'pre', 'a', 'tg-spoiler', 'tg-emoji', 'blockquote']
+    for tag in html_tags:
+        formatted_text = formatted_text.replace(f'&lt;{tag}&gt;', f'<{tag}>').replace(f'&lt;/{tag}&gt;', f'</{tag}>')
+    
+    return formatted_text
+
+# ====================== GOOGLE DRIVE FUNCTIONS ======================
 def get_drive_service():
     """Initialize and return Google Drive service"""
     creds = None
