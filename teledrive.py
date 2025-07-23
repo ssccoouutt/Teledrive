@@ -1,7 +1,6 @@
 import re
 import os
 import io
-import random
 import asyncio
 import traceback
 import time
@@ -26,7 +25,6 @@ TOKEN_PATH = 'token.json'
 CREDENTIALS_PATH = 'credentials.json'
 PHASE2_SOURCE = '1ixJU6s6bKbzIdsbjKDKrZYLt1nl_TSul'
 PHASE3_SOURCE = '1iM6ghIcYsx1gIvfdjm-HjCRW3MWy0JCP'
-SHORT_LINKS = ["rb.gy/cd8ugy", "bit.ly/3UcvhlA", "t.ly/CfcVB", "cutt.ly/Kee3oiLO"]
 TARGET_CHANNEL = "@techworld196"
 BANNED_FILE_ID = '1r2BpwG9isOkKjL5tYj3WqqiF5w4oWpCY'
 SCOPES = ['https://www.googleapis.com/auth/drive']
@@ -56,6 +54,146 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# ====================== TEXT FORMATTING FUNCTIONS ======================
+def adjust_entity_offsets(text, entities):
+    """Convert UTF-16 based offsets to proper character positions"""
+    if not entities:
+        return []
+    
+    # Create mapping between UTF-16 positions and character positions
+    utf16_to_char = {}
+    char_pos = 0
+    utf16_pos = 0
+    
+    for char in text:
+        utf16_to_char[utf16_pos] = char_pos
+        utf16_pos += len(char.encode('utf-16-le')) // 2
+        char_pos += 1
+    
+    # Adjust entity offsets
+    adjusted_entities = []
+    for entity in entities:
+        start = utf16_to_char.get(entity.offset, entity.offset)
+        end = utf16_to_char.get(entity.offset + entity.length, entity.offset + entity.length)
+        
+        new_entity = MessageEntity(
+            type=entity.type,
+            offset=start,
+            length=end - start,
+            url=entity.url,
+            user=entity.user,
+            language=entity.language,
+            custom_emoji_id=entity.custom_emoji_id
+        )
+        adjusted_entities.append(new_entity)
+    
+    return adjusted_entities
+
+def filter_entities(entities):
+    """Filter to only supported formatting entities"""
+    allowed_types = {
+        MessageEntity.BOLD,
+        MessageEntity.ITALIC,
+        MessageEntity.CODE,
+        MessageEntity.PRE,
+        MessageEntity.UNDERLINE,
+        MessageEntity.STRIKETHROUGH,
+        MessageEntity.TEXT_LINK,
+        MessageEntity.SPOILER,
+        "blockquote"
+    }
+    return [e for e in entities if getattr(e, 'type', None) in allowed_types] if entities else []
+
+def apply_formatting(text, entities):
+    """Apply all formatting with proper nesting"""
+    if not text:
+        return text
+    
+    # Convert to list for character-level manipulation
+    chars = list(text)
+    text_length = len(chars)
+    
+    # Sort entities by offset (reversed for proper insertion)
+    sorted_entities = sorted(entities or [], key=lambda e: -e.offset)
+    
+    # Entity processing map
+    entity_tags = {
+        MessageEntity.BOLD: ('<b>', '</b>'),
+        MessageEntity.ITALIC: ('<i>', '</i>'),
+        MessageEntity.UNDERLINE: ('<u>', '</u>'),
+        MessageEntity.STRIKETHROUGH: ('<s>', '</s>'),
+        MessageEntity.SPOILER: ('<tg-spoiler>', '</tg-spoiler>'),
+        MessageEntity.CODE: ('<code>', '</code>'),
+        MessageEntity.PRE: ('<pre>', '</pre>'),
+        MessageEntity.TEXT_LINK: (lambda e: f'<a href="{e.url}">', '</a>'),
+        "blockquote": ('<blockquote>', '</blockquote>')
+    }
+    
+    for entity in sorted_entities:
+        entity_type = getattr(entity, 'type', None)
+        if entity_type not in entity_tags:
+            continue
+            
+        start_tag, end_tag = entity_tags[entity_type]
+        if callable(start_tag):
+            start_tag = start_tag(entity)
+            
+        start = entity.offset
+        end = start + entity.length
+        
+        # Validate positions
+        if start >= text_length or end > text_length:
+            continue
+            
+        # Apply formatting
+        before = ''.join(chars[:start])
+        content = ''.join(chars[start:end])
+        after = ''.join(chars[end:])
+        
+        # Special handling for blockquotes to prevent nesting issues
+        if entity_type == "blockquote":
+            content = content.replace('<b>', '').replace('</b>', '')
+            content = content.replace('<i>', '').replace('</i>', '')
+        
+        chars = list(before + start_tag + content + end_tag + after)
+        text_length = len(chars)
+    
+    # Handle manual blockquotes (lines starting with >)
+    formatted_text = ''.join(chars)
+    if ">" in formatted_text:
+        formatted_text = formatted_text.replace("&gt;", ">")
+        lines = formatted_text.split('\n')
+        formatted_lines = []
+        in_blockquote = False
+        
+        for line in lines:
+            if line.startswith('>'):
+                if not in_blockquote:
+                    formatted_lines.append('<blockquote>')
+                    in_blockquote = True
+                formatted_lines.append(line[1:].strip())
+            else:
+                if in_blockquote:
+                    formatted_lines.append('</blockquote>')
+                    in_blockquote = False
+                formatted_lines.append(line)
+        
+        if in_blockquote:
+            formatted_lines.append('</blockquote>')
+        
+        formatted_text = '\n'.join(formatted_lines)
+    
+    # Final HTML escaping (except for our tags)
+    formatted_text = formatted_text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+    
+    # Re-insert our HTML tags
+    html_tags = ['b', 'i', 'u', 's', 'code', 'pre', 'a', 'tg-spoiler', 'blockquote']
+    for tag in html_tags:
+        formatted_text = formatted_text.replace(f'&lt;{tag}&gt;', f'<{tag}>').replace(f'&lt;/{tag}&gt;', f'</{tag}>')
+    
+    return formatted_text
+
+# ====================== GOOGLE DRIVE FUNCTIONS ======================
 def get_drive_service():
     """Initialize and return Google Drive service"""
     creds = None
@@ -199,6 +337,10 @@ def save_banned_items(service, banned_items):
     except Exception as e:
         logger.error(f"Error saving banned items: {str(e)}")
 
+def should_skip_item(name, banned_items):
+    """Check if item should be skipped based on banned list"""
+    return name in banned_items
+
 def extract_folder_id(url):
     """Extract folder ID from Google Drive URL with multiple pattern support"""
     patterns = [
@@ -228,10 +370,6 @@ def extract_file_id(url):
         if match:
             return match.group(1)
     return None
-
-def should_skip_item(name, banned_items):
-    """Check if item should be skipped based on banned list"""
-    return name in banned_items
 
 def execute_with_retry(func, *args, **kwargs):
     """Execute a function with retry mechanism"""
@@ -477,144 +615,6 @@ def rename_files_and_folders(service, folder_id):
             logger.error(f"Error listing files for renaming: {str(e)}")
             break
 
-def adjust_entity_offsets(text, entities):
-    """Convert UTF-16 based offsets to proper character positions"""
-    if not entities:
-        return []
-    
-    # Create mapping between UTF-16 positions and character positions
-    utf16_to_char = {}
-    char_pos = 0
-    utf16_pos = 0
-    
-    for char in text:
-        utf16_to_char[utf16_pos] = char_pos
-        utf16_pos += len(char.encode('utf-16-le')) // 2
-        char_pos += 1
-    
-    # Adjust entity offsets
-    adjusted_entities = []
-    for entity in entities:
-        start = utf16_to_char.get(entity.offset, entity.offset)
-        end = utf16_to_char.get(entity.offset + entity.length, entity.offset + entity.length)
-        
-        new_entity = MessageEntity(
-            type=entity.type,
-            offset=start,
-            length=end - start,
-            url=entity.url,
-            user=entity.user,
-            language=entity.language,
-            custom_emoji_id=entity.custom_emoji_id
-        )
-        adjusted_entities.append(new_entity)
-    
-    return adjusted_entities
-
-def filter_entities(entities):
-    """Filter to only supported formatting entities"""
-    allowed_types = {
-        MessageEntity.BOLD,
-        MessageEntity.ITALIC,
-        MessageEntity.CODE,
-        MessageEntity.PRE,
-        MessageEntity.UNDERLINE,
-        MessageEntity.STRIKETHROUGH,
-        MessageEntity.TEXT_LINK,
-        MessageEntity.SPOILER,
-        "blockquote"
-    }
-    return [e for e in entities if getattr(e, 'type', None) in allowed_types] if entities else []
-
-def apply_formatting(text, entities):
-    """Apply all formatting with proper nesting"""
-    if not text:
-        return text
-    
-    # Convert to list for character-level manipulation
-    chars = list(text)
-    text_length = len(chars)
-    
-    # Sort entities by offset (reversed for proper insertion)
-    sorted_entities = sorted(entities or [], key=lambda e: -e.offset)
-    
-    # Entity processing map
-    entity_tags = {
-        MessageEntity.BOLD: ('<b>', '</b>'),
-        MessageEntity.ITALIC: ('<i>', '</i>'),
-        MessageEntity.UNDERLINE: ('<u>', '</u>'),
-        MessageEntity.STRIKETHROUGH: ('<s>', '</s>'),
-        MessageEntity.SPOILER: ('<tg-spoiler>', '</tg-spoiler>'),
-        MessageEntity.CODE: ('<code>', '</code>'),
-        MessageEntity.PRE: ('<pre>', '</pre>'),
-        MessageEntity.TEXT_LINK: (lambda e: f'<a href="{e.url}">', '</a>'),
-        "blockquote": ('<blockquote>', '</blockquote>')
-    }
-    
-    for entity in sorted_entities:
-        entity_type = getattr(entity, 'type', None)
-        if entity_type not in entity_tags:
-            continue
-            
-        start_tag, end_tag = entity_tags[entity_type]
-        if callable(start_tag):
-            start_tag = start_tag(entity)
-            
-        start = entity.offset
-        end = start + entity.length
-        
-        # Validate positions
-        if start >= text_length or end > text_length:
-            continue
-            
-        # Apply formatting
-        before = ''.join(chars[:start])
-        content = ''.join(chars[start:end])
-        after = ''.join(chars[end:])
-        
-        # Special handling for blockquotes to prevent nesting issues
-        if entity_type == "blockquote":
-            content = content.replace('<b>', '').replace('</b>', '')
-            content = content.replace('<i>', '').replace('</i>', '')
-        
-        chars = list(before + start_tag + content + end_tag + after)
-        text_length = len(chars)
-    
-    # Handle manual blockquotes (lines starting with >)
-    formatted_text = ''.join(chars)
-    if ">" in formatted_text:
-        formatted_text = formatted_text.replace("&gt;", ">")
-        lines = formatted_text.split('\n')
-        formatted_lines = []
-        in_blockquote = False
-        
-        for line in lines:
-            if line.startswith('>'):
-                if not in_blockquote:
-                    formatted_lines.append('<blockquote>')
-                    in_blockquote = True
-                formatted_lines.append(line[1:].strip())
-            else:
-                if in_blockquote:
-                    formatted_lines.append('</blockquote>')
-                    in_blockquote = False
-                formatted_lines.append(line)
-        
-        if in_blockquote:
-            formatted_lines.append('</blockquote>')
-        
-        formatted_text = '\n'.join(formatted_lines)
-    
-    # Final HTML escaping (except for our tags)
-    formatted_text = formatted_text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-    
-    # Re-insert our HTML tags
-    html_tags = ['b', 'i', 'u', 's', 'code', 'pre', 'a', 'tg-spoiler', 'blockquote']
-    for tag in html_tags:
-        formatted_text = formatted_text.replace(f'&lt;{tag}&gt;', f'<{tag}>').replace(f'&lt;/{tag}&gt;', f'</{tag}>')
-    
-    return formatted_text
-
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle incoming messages with perfect formatting and blockquote support"""
     message = update.message
@@ -646,8 +646,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         new_folder_id = await asyncio.get_event_loop().run_in_executor(
                             None, copy_folder, drive_service, folder_id, banned_items
                         )
-                        random_link = random.choice(SHORT_LINKS)
-                        new_url = f'https://drive.google.com/drive/folders/{new_folder_id} {random_link}'
+                        new_url = (
+                            f'https://drive.google.com/drive/folders/{new_folder_id}\n\n'
+                            '<blockquote>➤ Spread The Value</blockquote>\n\n'
+                            '<b>Join Tech Zone 💀</b>\n'
+                            'https://whatsapp.com/channel/0029VacnMpyHrDZldKwMod38\n'
+                            '<b>Join LWZ Official 🗿</b>\n'
+                            'https://whatsapp.com/channel/0029VagERwvAzNc2E9gpkL3U'
+                        )
                         drive_links.append((url, new_url))
                         original_text = original_text.replace(url, new_url)
                     except Exception as e:
@@ -658,8 +664,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         new_file_id = await asyncio.get_event_loop().run_in_executor(
                             None, copy_file, drive_service, file_id, banned_items
                         )
-                        random_link = random.choice(SHORT_LINKS)
-                        new_url = f'https://drive.google.com/file/d/{new_file_id}/view?usp=sharing {random_link}'
+                        new_url = (
+                            f'https://drive.google.com/file/d/{new_file_id}/view?usp=sharing\n\n'
+                            '<blockquote>➤ Spread The Value</blockquote>\n\n'
+                            '<b>Join Tech Zone 💀</b>\n'
+                            'https://whatsapp.com/channel/0029VacnMpyHrDZldKwMod38\n'
+                            '<b>Join LWZ Official 🗿</b>\n'
+                            'https://whatsapp.com/channel/0029VagERwvAzNc2E9gpkL3U'
+                        )
                         drive_links.append((url, new_url))
                         original_text = original_text.replace(url, new_url)
                     except Exception as e:
@@ -795,6 +807,41 @@ async def unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"⚠️ Unban failed: {str(e)}")
 
+async def change(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Add a rename rule for files/folders"""
+    try:
+        if not context.args or len(context.args) < 3 or context.args[1].lower() != 'to':
+            await update.message.reply_text("❌ Usage: /change <old_text> to <new_text>")
+            return
+
+        # Split args into old and new parts
+        args = ' '.join(context.args).split(' to ', 1)
+        if len(args) != 2:
+            await update.message.reply_text("❌ Usage: /change <old_text> to <new_text>")
+            return
+
+        old_text, new_text = args
+        old_text = old_text.strip()
+        new_text = new_text.strip()
+
+        if not old_text or not new_text:
+            await update.message.reply_text("❌ Both old and new text must be specified")
+            return
+
+        drive_service = get_drive_service()
+        banned_items = initialize_banned_items(drive_service)
+
+        # Add the rename rule (format: old_text|new_text)
+        rename_rule = f"{old_text}|{new_text}"
+        banned_items.append(rename_rule)
+        save_banned_items(drive_service, banned_items)
+        response_text = f"✅ Rename rule added: '{old_text}' → '{new_text}'"
+
+        await update.message.reply_text(response_text)
+
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Change command failed: {str(e)}")
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Send welcome message with bot instructions"""
     await update.message.reply_text(
@@ -803,7 +850,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Commands:\n"
         "/auth - Authorize Google Drive\n"
         "/ban <name_or_link> - Block files/folders\n"
-        "/unban <name_or_link> - Unblock files/folders"
+        "/unban <name_or_link> - Unblock files/folders\n"
+        "/change <old> to <new> - Add rename rule"
     )
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -841,6 +889,7 @@ async def run_bot():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("ban", ban))
     application.add_handler(CommandHandler("unban", unban))
+    application.add_handler(CommandHandler("change", change))
     
     # Authorization conversation handler
     auth_conv = ConversationHandler(
