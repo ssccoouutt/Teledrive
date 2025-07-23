@@ -1,6 +1,7 @@
 import re
 import os
 import io
+import random
 import asyncio
 import traceback
 import time
@@ -25,6 +26,7 @@ TOKEN_PATH = 'token.json'
 CREDENTIALS_PATH = 'credentials.json'
 PHASE2_SOURCE = '1ixJU6s6bKbzIdsbjKDKrZYLt1nl_TSul'
 PHASE3_SOURCE = '1iM6ghIcYsx1gIvfdjm-HjCRW3MWy0JCP'
+SHORT_LINKS = ["rb.gy/cd8ugy", "bit.ly/3UcvhlA", "t.ly/CfcVB", "cutt.ly/Kee3oiLO"]
 TARGET_CHANNEL = "@techworld196"
 BANNED_FILE_ID = '1r2BpwG9isOkKjL5tYj3WqqiF5w4oWpCY'
 SCOPES = ['https://www.googleapis.com/auth/drive']
@@ -53,139 +55,6 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
-
-def adjust_entity_offsets(text, entities):
-    """Convert UTF-16 based offsets to proper character positions"""
-    if not entities:
-        return []
-    
-    # Create mapping between UTF-16 positions and character positions
-    utf16_to_char = {}
-    char_pos = 0
-    utf16_pos = 0
-    
-    for char in text:
-        utf16_to_char[utf16_pos] = char_pos
-        utf16_pos += len(char.encode('utf-16-le')) // 2
-        char_pos += 1
-    
-    # Adjust entity offsets
-    adjusted_entities = []
-    for entity in entities:
-        start = utf16_to_char.get(entity.offset, entity.offset)
-        end = utf16_to_char.get(entity.offset + entity.length, entity.offset + entity.length)
-        
-        new_entity = MessageEntity(
-            type=entity.type,
-            offset=start,
-            length=end - start,
-            url=entity.url,
-            user=entity.user,
-            language=entity.language,
-            custom_emoji_id=entity.custom_emoji_id
-        )
-        adjusted_entities.append(new_entity)
-    
-    return adjusted_entities
-
-def filter_entities(entities):
-    """Filter to only supported formatting entities"""
-    allowed_types = {
-        MessageEntity.BOLD,
-        MessageEntity.ITALIC,
-        MessageEntity.CODE,
-        MessageEntity.PRE,
-        MessageEntity.UNDERLINE,
-        MessageEntity.STRIKETHROUGH,
-        MessageEntity.TEXT_LINK,
-        MessageEntity.SPOILER,
-    }
-    return [e for e in entities if getattr(e, 'type', None) in allowed_types] if entities else []
-
-def apply_formatting(text, entities):
-    """Apply all formatting with proper nesting and escaping"""
-    if not text:
-        return text
-
-    # First handle all Telegram entities
-    chars = list(text)
-    text_length = len(chars)
-    sorted_entities = sorted(entities or [], key=lambda e: -e.offset)
-    
-    entity_tags = {
-        MessageEntity.BOLD: ('<b>', '</b>'),
-        MessageEntity.ITALIC: ('<i>', '</i>'),
-        MessageEntity.UNDERLINE: ('<u>', '</u>'),
-        MessageEntity.STRIKETHROUGH: ('<s>', '</s>'),
-        MessageEntity.SPOILER: ('<tg-spoiler>', '</tg-spoiler>'),
-        MessageEntity.CODE: ('<code>', '</code>'),
-        MessageEntity.PRE: ('<pre>', '</pre>'),
-        MessageEntity.TEXT_LINK: (lambda e: f'<a href="{e.url}">', '</a>'),
-    }
-
-    for entity in sorted_entities:
-        entity_type = getattr(entity, 'type', None)
-        if entity_type not in entity_tags:
-            continue
-            
-        start_tag, end_tag = entity_tags[entity_type]
-        if callable(start_tag):
-            start_tag = start_tag(entity)
-            
-        start = entity.offset
-        end = start + entity.length
-        
-        if start >= text_length or end > text_length:
-            continue
-            
-        before = ''.join(chars[:start])
-        content = ''.join(chars[start:end])
-        after = ''.join(chars[end:])
-        
-        # Clean content before applying tags
-        content = content.replace('<', '&lt;').replace('>', '&gt;')
-        chars = list(before + start_tag + content + end_tag + after)
-        text_length = len(chars)
-
-    formatted_text = ''.join(chars)
-    
-    # Then handle blockquotes from > characters
-    if ">" in formatted_text:
-        formatted_text = formatted_text.replace("&gt;", ">")
-        lines = formatted_text.split('\n')
-        formatted_lines = []
-        in_blockquote = False
-        
-        for line in lines:
-            if line.startswith('>'):
-                if not in_blockquote:
-                    formatted_lines.append('<blockquote>')
-                    in_blockquote = True
-                formatted_lines.append(line[1:].strip())
-            else:
-                if in_blockquote:
-                    formatted_lines.append('</blockquote>')
-                    in_blockquote = False
-                formatted_lines.append(line)
-        
-        if in_blockquote:
-            formatted_lines.append('</blockquote>')
-        
-        formatted_text = '\n'.join(formatted_lines)
-    
-    # Final HTML escaping (except for our tags)
-    formatted_text = formatted_text.replace('&', '&amp;')
-    
-    # Re-insert our HTML tags
-    html_tags = ['b', 'i', 'u', 's', 'code', 'pre', 'a', 'tg-spoiler', 'blockquote']
-    for tag in html_tags:
-        formatted_text = formatted_text.replace(f'&lt;{tag}&gt;', f'<{tag}>').replace(f'&lt;/{tag}&gt;', f'</{tag}>')
-    
-    # Clean up any malformed tags
-    formatted_text = re.sub(r'<([a-z]+)>\s*</\1>', '', formatted_text)  # Remove empty tags
-    formatted_text = re.sub(r'<b>(https?://[^<]+)</b>', r'\1', formatted_text)  # Don't bold URLs
-    
-    return formatted_text
 
 def get_drive_service():
     """Initialize and return Google Drive service"""
@@ -312,27 +181,81 @@ async def cancel_auth(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 def initialize_banned_items(service):
-    """Load banned items list from Google Drive"""
+    """Load banned items list from Google Drive with multiple sections"""
     try:
         request = service.files().get_media(fileId=BANNED_FILE_ID)
-        banned_file = request.execute()
-        return banned_file.decode('utf-8').splitlines()
+        banned_file = request.execute().decode('utf-8')
+        
+        # Parse different sections
+        sections = banned_file.split('\n\n')
+        banned_data = {
+            'names': [],
+            'size_types': [],
+            'rename_rules': []
+        }
+        
+        for section in sections:
+            if section.startswith('#BANNED_NAMES'):
+                banned_data['names'] = section.split('\n')[1:]
+            elif section.startswith('#BANNED_SIZE_TYPE'):
+                banned_data['size_types'] = section.split('\n')[1:]
+            elif section.startswith('#RENAME_RULES'):
+                banned_data['rename_rules'] = section.split('\n')[1:]
+        
+        return banned_data
     except Exception as e:
         logger.error(f"Error loading banned items: {str(e)}")
-        return []
+        return {
+            'names': [],
+            'size_types': [],
+            'rename_rules': []
+        }
 
-def save_banned_items(service, banned_items):
-    """Save banned items list to Google Drive"""
+def save_banned_items(service, banned_data):
+    """Save banned items list to Google Drive with multiple sections"""
     try:
-        content = '\n'.join(banned_items).encode('utf-8')
-        media = MediaIoBaseUpload(io.BytesIO(content), mimetype='text/plain')
+        content = ""
+        
+        # Names section
+        if banned_data['names']:
+            content += "#BANNED_NAMES\n" + "\n".join(banned_data['names']) + "\n\n"
+        
+        # Size+Type section
+        if banned_data['size_types']:
+            content += "#BANNED_SIZE_TYPE\n" + "\n".join(banned_data['size_types']) + "\n\n"
+        
+        # Rename rules section
+        if banned_data['rename_rules']:
+            content += "#RENAME_RULES\n" + "\n".join(banned_data['rename_rules'])
+        
+        # Remove extra newlines
+        content = content.strip()
+        
+        media = MediaIoBaseUpload(io.BytesIO(content.encode('utf-8')), mimetype='text/plain')
         service.files().update(fileId=BANNED_FILE_ID, media_body=media).execute()
     except Exception as e:
         logger.error(f"Error saving banned items: {str(e)}")
 
-def should_skip_item(name, banned_items):
+def should_skip_item(name, mime_type, size, banned_data):
     """Check if item should be skipped based on banned list"""
-    return name in banned_items
+    # Check against banned names
+    if name in banned_data['names']:
+        return True
+    
+    # Check against banned size+type combinations
+    size_type_str = f"{size}:{mime_type}"
+    if size_type_str in banned_data['size_types']:
+        return True
+    
+    return False
+
+def apply_rename_rules(name, rename_rules):
+    """Apply rename rules to a filename"""
+    for rule in rename_rules:
+        if '|' in rule:
+            old, new = rule.split('|', 1)
+            name = name.replace(old, new)
+    return name
 
 def extract_folder_id(url):
     """Extract folder ID from Google Drive URL with multiple pattern support"""
@@ -386,40 +309,48 @@ def execute_with_retry(func, *args, **kwargs):
             raise
     raise Exception(f"Operation failed after {MAX_RETRIES} attempts. Last error: {str(last_exception)}")
 
-def copy_file(service, file_id, banned_items):
+def copy_file(service, file_id, banned_data):
     """Copy a single file with retry mechanism"""
     try:
-        file = execute_with_retry(service.files().get, fileId=file_id, fields='name,mimeType')
+        file = execute_with_retry(service.files().get, fileId=file_id, fields='name,mimeType,size')
         
-        if should_skip_item(file['name'], banned_items):
-            raise Exception(f"File {file['name']} is banned")
+        # Apply rename rules first
+        new_name = apply_rename_rules(file['name'], banned_data['rename_rules'])
+        
+        # Check if should be skipped
+        if should_skip_item(new_name, file['mimeType'], file.get('size', 0), banned_data):
+            raise Exception(f"File {new_name} is banned")
             
         copied_file = service.files().copy(fileId=file_id).execute()
         return copied_file['id']
     except Exception as e:
         raise Exception(f"File copy failed: {str(e)}")
 
-def copy_folder(service, folder_id, banned_items):
+def copy_folder(service, folder_id, banned_data):
     """Copy a folder and its contents with retry mechanism"""
     try:
         folder = execute_with_retry(service.files().get, fileId=folder_id, fields='name')
+        
+        # Apply rename rules to folder name
+        new_folder_name = apply_rename_rules(folder['name'], banned_data['rename_rules'])
+        
         new_folder = service.files().create(body={
-            'name': folder['name'],
+            'name': new_folder_name,
             'mimeType': 'application/vnd.google-apps.folder'
         }).execute()
         new_folder_id = new_folder['id']
 
-        copy_folder_contents(service, folder_id, new_folder_id, banned_items)
+        copy_folder_contents(service, folder_id, new_folder_id, banned_data)
         subfolders = get_all_subfolders_recursive(service, new_folder_id)
         
         for subfolder_id in subfolders:
-            copy_files_only(service, PHASE2_SOURCE, subfolder_id, banned_items, overwrite=True)
+            copy_files_only(service, PHASE2_SOURCE, subfolder_id, banned_data, overwrite=True)
 
-        copy_bonus_content(service, PHASE3_SOURCE, new_folder_id, banned_items, overwrite=True)
-        rename_files_and_folders(service, new_folder_id)
+        copy_bonus_content(service, PHASE3_SOURCE, new_folder_id, banned_data, overwrite=True)
+        rename_files_and_folders(service, new_folder_id, banned_data['rename_rules'])
         
         for subfolder_id in subfolders:
-            rename_files_and_folders(service, subfolder_id)
+            rename_files_and_folders(service, subfolder_id, banned_data['rename_rules'])
 
         return new_folder_id
     except Exception as e:
@@ -454,23 +385,25 @@ def get_all_subfolders_recursive(service, folder_id):
                 break
     return subfolders
 
-def copy_files_only(service, source_id, dest_id, banned_items, overwrite=False):
+def copy_files_only(service, source_id, dest_id, banned_data, overwrite=False):
     """Copy files from source to destination with chunked processing"""
     page_token = None
     while True:
         try:
             response = execute_with_retry(service.files().list,
                 q=f"'{source_id}' in parents",
-                fields='nextPageToken, files(id, name, mimeType)',
+                fields='nextPageToken, files(id, name, mimeType, size)',
                 pageSize=CHUNK_SIZE,
                 pageToken=page_token
             )
             
             for item in response.get('files', []):
-                if should_skip_item(item['name'], banned_items):
+                # Apply rename rules and check if banned
+                new_name = apply_rename_rules(item['name'], banned_data['rename_rules'])
+                if should_skip_item(new_name, item['mimeType'], item.get('size', 0), banned_data):
                     continue
                 if item['mimeType'] != 'application/vnd.google-apps.folder':
-                    copy_item_to_folder(service, item, dest_id, banned_items, overwrite)
+                    copy_item_to_folder(service, item, dest_id, banned_data, overwrite)
             
             page_token = response.get('nextPageToken')
             if not page_token:
@@ -479,22 +412,24 @@ def copy_files_only(service, source_id, dest_id, banned_items, overwrite=False):
             logger.error(f"Error copying files: {str(e)}")
             break
 
-def copy_bonus_content(service, source_id, dest_id, banned_items, overwrite=False):
+def copy_bonus_content(service, source_id, dest_id, banned_data, overwrite=False):
     """Copy bonus content to destination with chunked processing"""
     page_token = None
     while True:
         try:
             response = execute_with_retry(service.files().list,
                 q=f"'{source_id}' in parents",
-                fields='nextPageToken, files(id, name, mimeType)',
+                fields='nextPageToken, files(id, name, mimeType, size)',
                 pageSize=CHUNK_SIZE,
                 pageToken=page_token
             )
             
             for item in response.get('files', []):
-                if should_skip_item(item['name'], banned_items):
+                # Apply rename rules and check if banned
+                new_name = apply_rename_rules(item['name'], banned_data['rename_rules'])
+                if should_skip_item(new_name, item['mimeType'], item.get('size', 0), banned_data):
                     continue
-                copy_item_to_folder(service, item, dest_id, banned_items, overwrite)
+                copy_item_to_folder(service, item, dest_id, banned_data, overwrite)
             
             page_token = response.get('nextPageToken')
             if not page_token:
@@ -503,12 +438,15 @@ def copy_bonus_content(service, source_id, dest_id, banned_items, overwrite=Fals
             logger.error(f"Error copying bonus content: {str(e)}")
             break
 
-def copy_item_to_folder(service, item, dest_folder_id, banned_items, overwrite=False):
+def copy_item_to_folder(service, item, dest_folder_id, banned_data, overwrite=False):
     """Copy individual item to destination folder with retry"""
     try:
+        # Apply rename rules
+        new_name = apply_rename_rules(item['name'], banned_data['rename_rules'])
+        
         if overwrite:
             existing = execute_with_retry(service.files().list,
-                q=f"name='{item['name']}' and '{dest_folder_id}' in parents",
+                q=f"name='{new_name}' and '{dest_folder_id}' in parents",
                 fields='files(id)'
             ).get('files', [])
             
@@ -517,11 +455,11 @@ def copy_item_to_folder(service, item, dest_folder_id, banned_items, overwrite=F
 
         if item['mimeType'] == 'application/vnd.google-apps.folder':
             new_folder = service.files().create(body={
-                'name': item['name'],
+                'name': new_name,
                 'parents': [dest_folder_id],
                 'mimeType': 'application/vnd.google-apps.folder'
             }).execute()
-            copy_bonus_content(service, item['id'], new_folder['id'], banned_items, overwrite)
+            copy_bonus_content(service, item['id'], new_folder['id'], banned_data, overwrite)
         else:
             service.files().copy(
                 fileId=item['id'],
@@ -530,29 +468,31 @@ def copy_item_to_folder(service, item, dest_folder_id, banned_items, overwrite=F
     except Exception as e:
         logger.error(f"Error copying {item['name']}: {str(e)}")
 
-def copy_folder_contents(service, source_id, dest_id, banned_items):
+def copy_folder_contents(service, source_id, dest_id, banned_data):
     """Copy all contents from source to destination folder with chunked processing"""
     page_token = None
     while True:
         try:
             response = execute_with_retry(service.files().list,
                 q=f"'{source_id}' in parents",
-                fields='nextPageToken, files(id, name, mimeType)',
+                fields='nextPageToken, files(id, name, mimeType, size)',
                 pageSize=CHUNK_SIZE,
                 pageToken=page_token
             )
             
             for item in response.get('files', []):
-                if should_skip_item(item['name'], banned_items):
+                # Apply rename rules and check if banned
+                new_name = apply_rename_rules(item['name'], banned_data['rename_rules'])
+                if should_skip_item(new_name, item['mimeType'], item.get('size', 0), banned_data):
                     continue
                     
                 if item['mimeType'] == 'application/vnd.google-apps.folder':
                     new_subfolder = service.files().create(body={
-                        'name': item['name'],
+                        'name': new_name,
                         'parents': [dest_id],
                         'mimeType': 'application/vnd.google-apps.folder'
                     }).execute()
-                    copy_folder_contents(service, item['id'], new_subfolder['id'], banned_items)
+                    copy_folder_contents(service, item['id'], new_subfolder['id'], banned_data)
                 else:
                     service.files().copy(
                         fileId=item['id'],
@@ -566,7 +506,7 @@ def copy_folder_contents(service, source_id, dest_id, banned_items):
             logger.error(f"Error copying folder contents: {str(e)}")
             break
 
-def rename_files_and_folders(service, folder_id):
+def rename_files_and_folders(service, folder_id, rename_rules):
     """Rename files and folders with both @mentions and .mp4 patterns with chunked processing"""
     page_token = None
     while True:
@@ -583,14 +523,17 @@ def rename_files_and_folders(service, folder_id):
                     current_name = item['name']
                     new_name = current_name
                     
-                    # Check for @mentions
+                    # First apply rename rules
+                    new_name = apply_rename_rules(current_name, rename_rules)
+                    
+                    # Then apply standard patterns
                     at_pattern = re.compile(r'@\w+')
-                    at_match = at_pattern.search(current_name)
+                    at_match = at_pattern.search(new_name)
                     
                     if at_match:
-                        new_name = at_pattern.sub('@TechZoneX', current_name)
-                    elif item['mimeType'] == 'video/mp4' and current_name.endswith('.mp4'):
-                        new_name = current_name.replace('.mp4', ' (Telegram@TechZoneX).mp4')
+                        new_name = at_pattern.sub('@TechZoneX', new_name)
+                    elif item['mimeType'] == 'video/mp4' and new_name.endswith('.mp4'):
+                        new_name = new_name.replace('.mp4', ' (Telegram@TechZoneX).mp4')
                     
                     if new_name != current_name:
                         service.files().update(
@@ -608,6 +551,144 @@ def rename_files_and_folders(service, folder_id):
             logger.error(f"Error listing files for renaming: {str(e)}")
             break
 
+def adjust_entity_offsets(text, entities):
+    """Convert UTF-16 based offsets to proper character positions"""
+    if not entities:
+        return []
+    
+    # Create mapping between UTF-16 positions and character positions
+    utf16_to_char = {}
+    char_pos = 0
+    utf16_pos = 0
+    
+    for char in text:
+        utf16_to_char[utf16_pos] = char_pos
+        utf16_pos += len(char.encode('utf-16-le')) // 2
+        char_pos += 1
+    
+    # Adjust entity offsets
+    adjusted_entities = []
+    for entity in entities:
+        start = utf16_to_char.get(entity.offset, entity.offset)
+        end = utf16_to_char.get(entity.offset + entity.length, entity.offset + entity.length)
+        
+        new_entity = MessageEntity(
+            type=entity.type,
+            offset=start,
+            length=end - start,
+            url=entity.url,
+            user=entity.user,
+            language=entity.language,
+            custom_emoji_id=entity.custom_emoji_id
+        )
+        adjusted_entities.append(new_entity)
+    
+    return adjusted_entities
+
+def filter_entities(entities):
+    """Filter to only supported formatting entities"""
+    allowed_types = {
+        MessageEntity.BOLD,
+        MessageEntity.ITALIC,
+        MessageEntity.CODE,
+        MessageEntity.PRE,
+        MessageEntity.UNDERLINE,
+        MessageEntity.STRIKETHROUGH,
+        MessageEntity.TEXT_LINK,
+        MessageEntity.SPOILER,
+        "blockquote"
+    }
+    return [e for e in entities if getattr(e, 'type', None) in allowed_types] if entities else []
+
+def apply_formatting(text, entities):
+    """Apply all formatting with proper nesting"""
+    if not text:
+        return text
+    
+    # Convert to list for character-level manipulation
+    chars = list(text)
+    text_length = len(chars)
+    
+    # Sort entities by offset (reversed for proper insertion)
+    sorted_entities = sorted(entities or [], key=lambda e: -e.offset)
+    
+    # Entity processing map
+    entity_tags = {
+        MessageEntity.BOLD: ('<b>', '</b>'),
+        MessageEntity.ITALIC: ('<i>', '</i>'),
+        MessageEntity.UNDERLINE: ('<u>', '</u>'),
+        MessageEntity.STRIKETHROUGH: ('<s>', '</s>'),
+        MessageEntity.SPOILER: ('<tg-spoiler>', '</tg-spoiler>'),
+        MessageEntity.CODE: ('<code>', '</code>'),
+        MessageEntity.PRE: ('<pre>', '</pre>'),
+        MessageEntity.TEXT_LINK: (lambda e: f'<a href="{e.url}">', '</a>'),
+        "blockquote": ('<blockquote>', '</blockquote>')
+    }
+    
+    for entity in sorted_entities:
+        entity_type = getattr(entity, 'type', None)
+        if entity_type not in entity_tags:
+            continue
+            
+        start_tag, end_tag = entity_tags[entity_type]
+        if callable(start_tag):
+            start_tag = start_tag(entity)
+            
+        start = entity.offset
+        end = start + entity.length
+        
+        # Validate positions
+        if start >= text_length or end > text_length:
+            continue
+            
+        # Apply formatting
+        before = ''.join(chars[:start])
+        content = ''.join(chars[start:end])
+        after = ''.join(chars[end:])
+        
+        # Special handling for blockquotes to prevent nesting issues
+        if entity_type == "blockquote":
+            content = content.replace('<b>', '').replace('</b>', '')
+            content = content.replace('<i>', '').replace('</i>', '')
+        
+        chars = list(before + start_tag + content + end_tag + after)
+        text_length = len(chars)
+    
+    # Handle manual blockquotes (lines starting with >)
+    formatted_text = ''.join(chars)
+    if ">" in formatted_text:
+        formatted_text = formatted_text.replace("&gt;", ">")
+        lines = formatted_text.split('\n')
+        formatted_lines = []
+        in_blockquote = False
+        
+        for line in lines:
+            if line.startswith('>'):
+                if not in_blockquote:
+                    formatted_lines.append('<blockquote>')
+                    in_blockquote = True
+                formatted_lines.append(line[1:].strip())
+            else:
+                if in_blockquote:
+                    formatted_lines.append('</blockquote>')
+                    in_blockquote = False
+                formatted_lines.append(line)
+        
+        if in_blockquote:
+            formatted_lines.append('</blockquote>')
+        
+        formatted_text = '\n'.join(formatted_lines)
+    
+    # Final HTML escaping (except for our tags)
+    formatted_text = formatted_text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+    
+    # Re-insert our HTML tags
+    html_tags = ['b', 'i', 'u', 's', 'code', 'pre', 'a', 'tg-spoiler', 'blockquote']
+    for tag in html_tags:
+        formatted_text = formatted_text.replace(f'&lt;{tag}&gt;', f'<{tag}>').replace(f'&lt;/{tag}&gt;', f'</{tag}>')
+    
+    return formatted_text
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle incoming messages with perfect formatting and blockquote support"""
     message = update.message
@@ -620,7 +701,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         drive_service = get_drive_service()
-        banned_items = initialize_banned_items(drive_service)
+        banned_data = initialize_banned_items(drive_service)
 
         if original_text:
             # Process Google Drive links
@@ -637,16 +718,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if folder_id:
                     try:
                         new_folder_id = await asyncio.get_event_loop().run_in_executor(
-                            None, copy_folder, drive_service, folder_id, banned_items
+                            None, copy_folder, drive_service, folder_id, banned_data
                         )
-                        new_url = (
-                            f'https://drive.google.com/drive/folders/{new_folder_id}\n\n'
-                            '<blockquote>➤ Spread The Value</blockquote>\n\n'
-                            '<b>Join Tech Zone 💀</b>\n'
-                            'https://whatsapp.com/channel/0029VacnMpyHrDZldKwMod38\n'
-                            '<b>Join LWZ Official 🗿</b>\n'
-                            'https://whatsapp.com/channel/0029VagERwvAzNc2E9gpkL3U'
-                        )
+                        random_link = random.choice(SHORT_LINKS)
+                        new_url = f'https://drive.google.com/drive/folders/{new_folder_id} {random_link}'
                         drive_links.append((url, new_url))
                         original_text = original_text.replace(url, new_url)
                     except Exception as e:
@@ -655,16 +730,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 elif file_id:
                     try:
                         new_file_id = await asyncio.get_event_loop().run_in_executor(
-                            None, copy_file, drive_service, file_id, banned_items
+                            None, copy_file, drive_service, file_id, banned_data
                         )
-                        new_url = (
-                            f'https://drive.google.com/file/d/{new_file_id}/view?usp=sharing\n\n'
-                            '<blockquote>➤ Spread The Value</blockquote>\n\n'
-                            '<b>Join Tech Zone 💀</b>\n'
-                            'https://whatsapp.com/channel/0029VacnMpyHrDZldKwMod38\n'
-                            '<b>Join LWZ Official 🗿</b>\n'
-                            'https://whatsapp.com/channel/0029VagERwvAzNc2E9gpkL3U'
-                        )
+                        random_link = random.choice(SHORT_LINKS)
+                        new_url = f'https://drive.google.com/file/d/{new_file_id}/view?usp=sharing {random_link}'
                         drive_links.append((url, new_url))
                         original_text = original_text.replace(url, new_url)
                     except Exception as e:
@@ -681,9 +750,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             filtered_entities = filter_entities(original_entities)
             adjusted_entities = adjust_entity_offsets(final_text, filtered_entities)
             formatted_text = apply_formatting(final_text, adjusted_entities)
-            
-            # Debug logging
-            logger.info(f"Formatted text before sending: {formatted_text}")
         else:
             formatted_text = ''
 
@@ -727,7 +793,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
     except Exception as e:
-        logger.error(f"Error processing message: {traceback.format_exc()}")
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text=f"⚠️ Processing error: {str(e)[:200]}"
@@ -742,27 +807,39 @@ async def ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         input_text = ' '.join(context.args).strip()
         drive_service = get_drive_service()
-        banned_items = initialize_banned_items(drive_service)
+        banned_data = initialize_banned_items(drive_service)
 
         # Check if input is a Google Drive link
         file_id = extract_file_id(input_text)
         folder_id = extract_folder_id(input_text)
         
-        item_name = input_text  # default to original input
-        
-        if file_id:
-            file_info = execute_with_retry(drive_service.files().get, fileId=file_id, fields='name')
-            item_name = file_info['name']
-        elif folder_id:
-            folder_info = execute_with_retry(drive_service.files().get, fileId=folder_id, fields='name')
-            item_name = folder_info['name']
-
-        if item_name not in banned_items:
-            banned_items.append(item_name)
-            save_banned_items(drive_service, banned_items)
-            response_text = f"✅ Banned: {item_name}"
+        if file_id or folder_id:
+            # Ban by size and type
+            item_id = file_id or folder_id
+            item_info = execute_with_retry(drive_service.files().get, 
+                fileId=item_id, 
+                fields='name,size,mimeType'
+            )
+            
+            size = item_info.get('size', '0')
+            mime_type = item_info.get('mimeType', 'unknown')
+            size_type_str = f"{size}:{mime_type}"
+            
+            if size_type_str not in banned_data['size_types']:
+                banned_data['size_types'].append(size_type_str)
+                save_banned_items(drive_service, banned_data)
+                response_text = f"✅ Banned by size+type: {size} bytes, {mime_type}"
+            else:
+                response_text = f"⚠️ Already banned by size+type: {size} bytes, {mime_type}"
         else:
-            response_text = f"⚠️ Already banned: {item_name}"
+            # Ban by name
+            item_name = input_text
+            if item_name not in banned_data['names']:
+                banned_data['names'].append(item_name)
+                save_banned_items(drive_service, banned_data)
+                response_text = f"✅ Banned by name: {item_name}"
+            else:
+                response_text = f"⚠️ Already banned by name: {item_name}"
         
         await update.message.reply_text(response_text)
 
@@ -778,26 +855,39 @@ async def unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         input_text = ' '.join(context.args).strip()
         drive_service = get_drive_service()
-        banned_items = initialize_banned_items(drive_service)
+        banned_data = initialize_banned_items(drive_service)
 
+        # Check if input is a Google Drive link
         file_id = extract_file_id(input_text)
         folder_id = extract_folder_id(input_text)
         
-        item_name = input_text  # default to original input
-        
-        if file_id:
-            file_info = execute_with_retry(drive_service.files().get, fileId=file_id, fields='name')
-            item_name = file_info['name']
-        elif folder_id:
-            folder_info = execute_with_retry(drive_service.files().get, fileId=folder_id, fields='name')
-            item_name = folder_info['name']
-
-        if item_name in banned_items:
-            banned_items.remove(item_name)
-            save_banned_items(drive_service, banned_items)
-            response_text = f"✅ Unbanned: {item_name}"
+        if file_id or folder_id:
+            # Try to unban by size and type
+            item_id = file_id or folder_id
+            item_info = execute_with_retry(drive_service.files().get, 
+                fileId=item_id, 
+                fields='name,size,mimeType'
+            )
+            
+            size = item_info.get('size', '0')
+            mime_type = item_info.get('mimeType', 'unknown')
+            size_type_str = f"{size}:{mime_type}"
+            
+            if size_type_str in banned_data['size_types']:
+                banned_data['size_types'].remove(size_type_str)
+                save_banned_items(drive_service, banned_data)
+                response_text = f"✅ Unbanned by size+type: {size} bytes, {mime_type}"
+            else:
+                response_text = f"⚠️ Not banned by size+type: {size} bytes, {mime_type}"
         else:
-            response_text = f"⚠️ Not banned: {item_name}"
+            # Try to unban by name
+            item_name = input_text
+            if item_name in banned_data['names']:
+                banned_data['names'].remove(item_name)
+                save_banned_items(drive_service, banned_data)
+                response_text = f"✅ Unbanned by name: {item_name}"
+            else:
+                response_text = f"⚠️ Not banned by name: {item_name}"
         
         await update.message.reply_text(response_text)
 
@@ -826,13 +916,16 @@ async def change(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         drive_service = get_drive_service()
-        banned_items = initialize_banned_items(drive_service)
+        banned_data = initialize_banned_items(drive_service)
 
         # Add the rename rule (format: old_text|new_text)
         rename_rule = f"{old_text}|{new_text}"
-        banned_items.append(rename_rule)
-        save_banned_items(drive_service, banned_items)
-        response_text = f"✅ Rename rule added: '{old_text}' → '{new_text}'"
+        if rename_rule not in banned_data['rename_rules']:
+            banned_data['rename_rules'].append(rename_rule)
+            save_banned_items(drive_service, banned_data)
+            response_text = f"✅ Rename rule added: '{old_text}' → '{new_text}'"
+        else:
+            response_text = f"⚠️ Rename rule already exists: '{old_text}' → '{new_text}'"
 
         await update.message.reply_text(response_text)
 
