@@ -99,7 +99,6 @@ def filter_entities(entities):
         MessageEntity.STRIKETHROUGH,
         MessageEntity.TEXT_LINK,
         MessageEntity.SPOILER,
-        "blockquote"
     }
     return [e for e in entities if getattr(e, 'type', None) in allowed_types] if entities else []
 
@@ -125,7 +124,6 @@ def apply_formatting(text, entities):
         MessageEntity.CODE: ('<code>', '</code>'),
         MessageEntity.PRE: ('<pre>', '</pre>'),
         MessageEntity.TEXT_LINK: (lambda e: f'<a href="{e.url}">', '</a>'),
-        "blockquote": ('<blockquote>', '</blockquote>')
     }
     
     for entity in sorted_entities:
@@ -148,11 +146,6 @@ def apply_formatting(text, entities):
         before = ''.join(chars[:start])
         content = ''.join(chars[start:end])
         after = ''.join(chars[end:])
-        
-        # Special handling for blockquotes to prevent nesting issues
-        if entity_type == "blockquote":
-            content = content.replace('<b>', '').replace('</b>', '')
-            content = content.replace('<i>', '').replace('</i>', '')
         
         chars = list(before + start_tag + content + end_tag + after)
         text_length = len(chars)
@@ -686,6 +679,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             filtered_entities = filter_entities(original_entities)
             adjusted_entities = adjust_entity_offsets(final_text, filtered_entities)
             formatted_text = apply_formatting(final_text, adjusted_entities)
+            
+            # Debug logging
+            logger.info(f"Formatted text before sending: {formatted_text}")
         else:
             formatted_text = ''
 
@@ -729,6 +725,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
     except Exception as e:
+        logger.error(f"Error processing message: {traceback.format_exc()}")
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text=f"⚠️ Processing error: {str(e)[:200]}"
