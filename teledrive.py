@@ -403,7 +403,7 @@ def filter_entities(entities):
     return [e for e in entities if getattr(e, 'type', None) in allowed_types] if entities else []
 
 def apply_formatting(text, entities):
-    """Restored Original Logic with safer blockquote handling"""
+    """Restored Original Logic with blockquote entity support and removed manual '>'-based blockquote handling"""
     if not text: return text
     chars = list(text)
     text_length = len(chars)
@@ -430,35 +430,15 @@ def apply_formatting(text, entities):
         before = ''.join(chars[:start])
         content = ''.join(chars[start:end])
         after = ''.join(chars[end:])
-        # NOTE: previously we stripped formatting tags inside blockquotes here which caused mismatches.
-        # We now KEEP inner formatting intact to preserve tag balance.
+        # Keep inner formatting intact (do not strip tags inside blockquote)
         chars = list(before + start_tag + content + end_tag + after)
         text_length = len(chars)
     
-    # Manual Blockquote Handling (restored)
-    formatted_text = ''.join(chars)
-    if ">" in formatted_text:
-        # Convert any escaped blockquote markers back to literal '>' for detection
-        formatted_text = formatted_text.replace("&gt;", ">")
-        lines = formatted_text.split('\n')
-        formatted_lines = []
-        in_blockquote = False
-        for line in lines:
-            if line.startswith('>'):
-                if not in_blockquote:
-                    formatted_lines.append('<blockquote>')
-                    in_blockquote = True
-                # keep inner formatting tags intact
-                formatted_lines.append(line[1:].strip())
-            else:
-                if in_blockquote:
-                    formatted_lines.append('</blockquote>')
-                    in_blockquote = False
-                formatted_lines.append(line)
-        if in_blockquote: formatted_lines.append('</blockquote>')
-        formatted_text = '\n'.join(formatted_lines)
+    # NOTE: removed line-based '>' blockquote processing because Telegram blockquote entities
+    # are already handled above. Keeping manual '>' handling caused truncation issues.
     
     # Escape everything, then unescape allowed tags
+    formatted_text = ''.join(chars)
     formatted_text = formatted_text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
     html_tags = ['b', 'i', 'u', 's', 'code', 'pre', 'a', 'tg-spoiler', 'blockquote']
     for tag in html_tags:
@@ -508,7 +488,6 @@ def close_dangling_tags(html_text):
                 # Unmatched closer: try to find it in the stack
                 if tag_name in stack:
                     # Close intermediate tags first (insert explicit closers), then close this tag
-                    # pop until we reach the tag_name
                     temp = []
                     while stack and stack[-1] != tag_name:
                         t = stack.pop()
