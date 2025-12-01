@@ -54,6 +54,8 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
+# Silence aiohttp access logs to clean up output
+logging.getLogger('aiohttp.access').setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 def get_drive_service():
@@ -93,8 +95,8 @@ async def self_ping():
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(f'http://localhost:{WEB_PORT}{HEALTH_CHECK_ENDPOINT}') as resp:
-                    status = f"Status: {resp.status}" if resp.status != 200 else "Success"
-                    logger.info(f"Keepalive ping {status}")
+                    # Removed logging here to reduce noise
+                    pass
                     
             with open('/tmp/last_active.txt', 'w') as f:
                 f.write(str(datetime.now()))
@@ -183,6 +185,7 @@ async def cancel_auth(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def initialize_banned_items(service):
     """Load banned items list from Google Drive with multiple sections"""
     try:
+        logger.info(f"Loading banned items from file ID: {BANNED_FILE_ID}")
         request = service.files().get_media(fileId=BANNED_FILE_ID)
         banned_file = request.execute().decode('utf-8')
         
@@ -202,6 +205,7 @@ def initialize_banned_items(service):
             elif section.startswith('#RENAME_RULES'):
                 banned_data['rename_rules'] = section.split('\n')[1:]
         
+        logger.info(f"Loaded {len(banned_data['names'])} banned names, {len(banned_data['size_types'])} types, {len(banned_data['rename_rules'])} rules")
         return banned_data
     except Exception as e:
         logger.error(f"Error loading banned items: {str(e)}")
@@ -214,6 +218,7 @@ def initialize_banned_items(service):
 def save_banned_items(service, banned_data):
     """Save banned items list to Google Drive with multiple sections"""
     try:
+        logger.info("Saving updated banned items to Drive...")
         content = ""
         
         # Names section
@@ -233,6 +238,7 @@ def save_banned_items(service, banned_data):
         
         media = MediaIoBaseUpload(io.BytesIO(content.encode('utf-8')), mimetype='text/plain')
         service.files().update(fileId=BANNED_FILE_ID, media_body=media).execute()
+        logger.info("Banned items saved successfully.")
     except Exception as e:
         logger.error(f"Error saving banned items: {str(e)}")
 
@@ -240,21 +246,26 @@ def should_skip_item(name, mime_type, size, banned_data):
     """Check if item should be skipped based on banned list"""
     # Check against banned names
     if name in banned_data['names']:
+        logger.info(f"Skipping banned name: {name}")
         return True
     
     # Check against banned size+type combinations
     size_type_str = f"{size}:{mime_type}"
     if size_type_str in banned_data['size_types']:
+        logger.info(f"Skipping banned size/type: {size_type_str}")
         return True
     
     return False
 
 def apply_rename_rules(name, rename_rules):
     """Apply rename rules to a filename"""
+    original_name = name
     for rule in rename_rules:
         if '|' in rule:
             old, new = rule.split('|', 1)
             name = name.replace(old, new)
+    if original_name != name:
+        logger.info(f"Renaming rule applied: '{original_name}' -> '{name}'")
     return name
 
 def extract_folder_id(url):
@@ -290,29 +301,37 @@ def extract_file_id(url):
 def execute_with_retry(func, *args, **kwargs):
     """Execute a function with retry mechanism"""
     last_exception = None
+    # Extract function name for better logging
+    func_name = getattr(func, '__name__', str(func))
+    
     for attempt in range(MAX_RETRIES):
         try:
+            # logger.debug(f"Executing API call {func_name}, attempt {attempt + 1}")
             return func(*args, **kwargs).execute()
         except HttpError as e:
             if e.resp.status in [500, 502, 503, 504] or 'timed out' in str(e).lower():
                 last_exception = e
-                logger.warning(f"Attempt {attempt + 1} failed, retrying in {RETRY_DELAY} seconds...")
+                logger.warning(f"API {func_name} attempt {attempt + 1} failed, retrying in {RETRY_DELAY}s...")
                 time.sleep(RETRY_DELAY)
                 continue
+            logger.error(f"API Error in {func_name}: {e}")
             raise
         except Exception as e:
             if 'timed out' in str(e).lower() and attempt < MAX_RETRIES - 1:
                 last_exception = e
-                logger.warning(f"Attempt {attempt + 1} failed, retrying in {RETRY_DELAY} seconds...")
+                logger.warning(f"Generic error in {func_name} attempt {attempt + 1} failed, retrying...")
                 time.sleep(RETRY_DELAY)
                 continue
+            logger.error(f"Critical error in {func_name}: {e}")
             raise
-    raise Exception(f"Operation failed after {MAX_RETRIES} attempts. Last error: {str(last_exception)}")
+    raise Exception(f"Operation {func_name} failed after {MAX_RETRIES} attempts. Last error: {str(last_exception)}")
 
 def copy_file(service, file_id, banned_data):
     """Copy a single file with retry mechanism"""
     try:
+        logger.info(f"STEP: Processing single file {file_id}")
         file = execute_with_retry(service.files().get, fileId=file_id, fields='name,mimeType,size')
+        logger.info(f"Found file: {file.get('name')}")
         
         # Apply rename rules first
         new_name = apply_rename_rules(file['name'], banned_data['rename_rules'])
@@ -321,45 +340,67 @@ def copy_file(service, file_id, banned_data):
         if should_skip_item(new_name, file['mimeType'], file.get('size', 0), banned_data):
             raise Exception(f"File {new_name} is banned")
             
+        logger.info(f"Copying file to root: {new_name}")
         copied_file = service.files().copy(fileId=file_id).execute()
+        logger.info(f"File copy successful. New ID: {copied_file['id']}")
         return copied_file['id']
     except Exception as e:
+        logger.error(f"FAILED to copy file {file_id}: {str(e)}")
         raise Exception(f"File copy failed: {str(e)}")
 
 def copy_folder(service, folder_id, banned_data):
     """Copy a folder and its contents with retry mechanism"""
     try:
+        logger.info(f"STEP: Starting folder copy process for ID: {folder_id}")
         folder = execute_with_retry(service.files().get, fileId=folder_id, fields='name')
+        logger.info(f"Source folder name: {folder['name']}")
         
         # Apply rename rules to folder name
         new_folder_name = apply_rename_rules(folder['name'], banned_data['rename_rules'])
         
+        logger.info(f"Creating new root folder: {new_folder_name}")
         new_folder = service.files().create(body={
             'name': new_folder_name,
             'mimeType': 'application/vnd.google-apps.folder'
         }).execute()
         new_folder_id = new_folder['id']
+        logger.info(f"Created new folder ID: {new_folder_id}")
 
+        logger.info("Starting recursive content copy...")
         copy_folder_contents(service, folder_id, new_folder_id, banned_data)
-        subfolders = get_all_subfolders_recursive(service, new_folder_id)
         
-        for subfolder_id in subfolders:
+        logger.info("Fetching subfolders for phase 2 processing...")
+        subfolders = get_all_subfolders_recursive(service, new_folder_id)
+        logger.info(f"Found {len(subfolders)} subfolders in new structure.")
+        
+        logger.info("Executing Phase 2: Copying files from PHASE2_SOURCE to all subfolders...")
+        for i, subfolder_id in enumerate(subfolders):
+            logger.info(f"Phase 2 processing subfolder {i+1}/{len(subfolders)}: {subfolder_id}")
             copy_files_only(service, PHASE2_SOURCE, subfolder_id, banned_data, overwrite=True)
 
+        logger.info("Executing Phase 3: Copying bonus content to root...")
         copy_bonus_content(service, PHASE3_SOURCE, new_folder_id, banned_data, overwrite=True)
+        
+        logger.info("Executing Phase 4: Renaming files in root...")
         rename_files_and_folders(service, new_folder_id, banned_data['rename_rules'])
         
-        for subfolder_id in subfolders:
+        logger.info("Executing Phase 4: Renaming files in subfolders...")
+        for i, subfolder_id in enumerate(subfolders):
+            logger.info(f"Renaming files in subfolder {i+1}/{len(subfolders)}")
             rename_files_and_folders(service, subfolder_id, banned_data['rename_rules'])
 
+        logger.info(f"COMPLETED folder copy process for {folder_id}")
         return new_folder_id
     except Exception as e:
+        logger.error(f"CRITICAL FAILURE in copy_folder for {folder_id}: {str(e)}")
+        logger.error(traceback.format_exc())
         raise Exception(f"Copy failed: {str(e)}")
 
 def get_all_subfolders_recursive(service, folder_id):
     """Get all subfolder IDs recursively with chunked processing"""
     subfolders = []
     queue = [folder_id]
+    logger.info(f"Scanning subfolders starting from {folder_id}")
     
     while queue:
         current_folder = queue.pop(0)
@@ -369,11 +410,14 @@ def get_all_subfolders_recursive(service, folder_id):
             try:
                 response = execute_with_retry(service.files().list,
                     q=f"'{current_folder}' in parents and mimeType='application/vnd.google-apps.folder'",
-                    fields='nextPageToken, files(id)',
+                    fields='nextPageToken, files(id, name)',
                     pageSize=CHUNK_SIZE
                 )
                 
-                for folder in response.get('files', []):
+                files = response.get('files', [])
+                # logger.info(f"Found {len(files)} subfolders in {current_folder}")
+                
+                for folder in files:
                     subfolders.append(folder['id'])
                     queue.append(folder['id'])
                 
@@ -381,13 +425,14 @@ def get_all_subfolders_recursive(service, folder_id):
                 if not page_token:
                     break
             except Exception as e:
-                logger.error(f"Error getting subfolders: {str(e)}")
+                logger.error(f"Error getting subfolders for {current_folder}: {str(e)}")
                 break
     return subfolders
 
 def copy_files_only(service, source_id, dest_id, banned_data, overwrite=False):
     """Copy files from source to destination with chunked processing"""
     page_token = None
+    # logger.info(f"Copying files ONLY from {source_id} to {dest_id}")
     while True:
         try:
             response = execute_with_retry(service.files().list,
@@ -398,7 +443,6 @@ def copy_files_only(service, source_id, dest_id, banned_data, overwrite=False):
             )
             
             for item in response.get('files', []):
-                # Apply rename rules and check if banned
                 new_name = apply_rename_rules(item['name'], banned_data['rename_rules'])
                 if should_skip_item(new_name, item['mimeType'], item.get('size', 0), banned_data):
                     continue
@@ -409,12 +453,13 @@ def copy_files_only(service, source_id, dest_id, banned_data, overwrite=False):
             if not page_token:
                 break
         except Exception as e:
-            logger.error(f"Error copying files: {str(e)}")
+            logger.error(f"Error copying files from {source_id}: {str(e)}")
             break
 
 def copy_bonus_content(service, source_id, dest_id, banned_data, overwrite=False):
     """Copy bonus content to destination with chunked processing"""
     page_token = None
+    logger.info(f"Copying BONUS content from {source_id} to {dest_id}")
     while True:
         try:
             response = execute_with_retry(service.files().list,
@@ -425,7 +470,6 @@ def copy_bonus_content(service, source_id, dest_id, banned_data, overwrite=False
             )
             
             for item in response.get('files', []):
-                # Apply rename rules and check if banned
                 new_name = apply_rename_rules(item['name'], banned_data['rename_rules'])
                 if should_skip_item(new_name, item['mimeType'], item.get('size', 0), banned_data):
                     continue
@@ -451,6 +495,7 @@ def copy_item_to_folder(service, item, dest_folder_id, banned_data, overwrite=Fa
             ).get('files', [])
             
             for file in existing:
+                # logger.info(f"Overwriting existing file: {new_name}")
                 execute_with_retry(service.files().delete, fileId=file['id'])
 
         if item['mimeType'] == 'application/vnd.google-apps.folder':
@@ -465,12 +510,14 @@ def copy_item_to_folder(service, item, dest_folder_id, banned_data, overwrite=Fa
                 fileId=item['id'],
                 body={'parents': [dest_folder_id]}
             ).execute()
+            # logger.info(f"Copied item: {new_name}")
     except Exception as e:
-        logger.error(f"Error copying {item['name']}: {str(e)}")
+        logger.error(f"Error copying {item['name']} ({item['id']}): {str(e)}")
 
 def copy_folder_contents(service, source_id, dest_id, banned_data):
     """Copy all contents from source to destination folder with chunked processing"""
     page_token = None
+    logger.info(f"Deep copying contents from {source_id} to {dest_id}...")
     while True:
         try:
             response = execute_with_retry(service.files().list,
@@ -480,13 +527,17 @@ def copy_folder_contents(service, source_id, dest_id, banned_data):
                 pageToken=page_token
             )
             
-            for item in response.get('files', []):
+            files_list = response.get('files', [])
+            # logger.info(f"Processing batch of {len(files_list)} files...")
+            
+            for item in files_list:
                 # Apply rename rules and check if banned
                 new_name = apply_rename_rules(item['name'], banned_data['rename_rules'])
                 if should_skip_item(new_name, item['mimeType'], item.get('size', 0), banned_data):
                     continue
                     
                 if item['mimeType'] == 'application/vnd.google-apps.folder':
+                    logger.info(f"Found subfolder: {new_name}, creating and diving in...")
                     new_subfolder = service.files().create(body={
                         'name': new_name,
                         'parents': [dest_id],
@@ -501,9 +552,10 @@ def copy_folder_contents(service, source_id, dest_id, banned_data):
             
             page_token = response.get('nextPageToken')
             if not page_token:
+                logger.info(f"Finished copying immediate children of {source_id}")
                 break
         except Exception as e:
-            logger.error(f"Error copying folder contents: {str(e)}")
+            logger.error(f"Error copying folder contents from {source_id}: {str(e)}")
             break
 
 def rename_files_and_folders(service, folder_id, rename_rules):
@@ -536,6 +588,7 @@ def rename_files_and_folders(service, folder_id, rename_rules):
                         new_name = new_name.replace('.mp4', ' (Telegram@TechZoneX).mp4')
                     
                     if new_name != current_name:
+                        logger.info(f"Renaming item in Place: {current_name} -> {new_name}")
                         service.files().update(
                             fileId=item['id'],
                             body={'name': new_name}
@@ -548,7 +601,7 @@ def rename_files_and_folders(service, folder_id, rename_rules):
             if not page_token:
                 break
         except Exception as e:
-            logger.error(f"Error listing files for renaming: {str(e)}")
+            logger.error(f"Error listing files for renaming in {folder_id}: {str(e)}")
             break
 
 def adjust_entity_offsets(text, entities):
@@ -695,6 +748,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not message or (message.text and message.text.startswith('/')):
         return
 
+    logger.info("New message received. Processing started...")
     original_text = message.caption or message.text or ''
     original_entities = message.caption_entities if message.caption else message.entities
     drive_links = []
@@ -710,33 +764,42 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 original_text
             ))
             
+            logger.info(f"Found {len(url_matches)} Drive links in message.")
+            
             for match in url_matches:
                 url = match.group()
+                logger.info(f"Processing URL: {url}")
                 folder_id = extract_folder_id(url)
                 file_id = extract_file_id(url)
                 
                 if folder_id:
                     try:
+                        logger.info(f"Identified ID {folder_id} as FOLDER. Starting background task...")
                         new_folder_id = await asyncio.get_event_loop().run_in_executor(
                             None, copy_folder, drive_service, folder_id, banned_data
                         )
+                        logger.info(f"Folder processing complete. New ID: {new_folder_id}")
                         random_link = random.choice(SHORT_LINKS)
                         new_url = f'https://drive.google.com/drive/folders/{new_folder_id} {random_link}'
                         drive_links.append((url, new_url))
                         original_text = original_text.replace(url, new_url)
                     except Exception as e:
+                        logger.error(f"⚠️ Error processing folder {url}: {str(e)}")
                         await message.reply_text(f"⚠️ Error processing folder {url}: {str(e)}")
                         continue
                 elif file_id:
                     try:
+                        logger.info(f"Identified ID {file_id} as FILE. Starting background task...")
                         new_file_id = await asyncio.get_event_loop().run_in_executor(
                             None, copy_file, drive_service, file_id, banned_data
                         )
+                        logger.info(f"File processing complete. New ID: {new_file_id}")
                         random_link = random.choice(SHORT_LINKS)
                         new_url = f'https://drive.google.com/file/d/{new_file_id}/view?usp=sharing {random_link}'
                         drive_links.append((url, new_url))
                         original_text = original_text.replace(url, new_url)
                     except Exception as e:
+                        logger.error(f"⚠️ Error processing file {url}: {str(e)}")
                         await message.reply_text(f"⚠️ Error processing file {url}: {str(e)}")
                         continue
 
@@ -759,6 +822,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'disable_notification': True,
             'parse_mode': ParseMode.HTML
         }
+        
+        logger.info(f"Sending processed message to channel {TARGET_CHANNEL}")
 
         if message.photo:
             send_args['caption'] = formatted_text
@@ -791,8 +856,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 chat_id=TARGET_CHANNEL,
                 parse_mode=ParseMode.HTML
             )
+        logger.info("Message sent successfully. Request complete.")
 
     except Exception as e:
+        logger.error(f"Processing error in handle_message: {str(e)}")
+        logger.error(traceback.format_exc())
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text=f"⚠️ Processing error: {str(e)[:200]}"
@@ -1046,3 +1114,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
