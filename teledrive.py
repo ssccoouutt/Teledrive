@@ -37,7 +37,7 @@ PING_INTERVAL = 25
 HEALTH_CHECK_ENDPOINT = "/health"
 
 # Constants
-MAX_RETRIES = 5  # Increased retries
+MAX_RETRIES = 5  # Increased retries for stability
 CHUNK_SIZE = 20  # Number of files to process at once
 
 # Authorization state
@@ -53,7 +53,7 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
-# CRITICAL FIX: Silence the noisy libraries so we can see the actual errors
+# Silence the noisy libraries
 logging.getLogger('httpx').setLevel(logging.WARNING)
 logging.getLogger('aiohttp.access').setLevel(logging.WARNING)
 logging.getLogger('googleapiclient.discovery_cache').setLevel(logging.WARNING)
@@ -225,7 +225,6 @@ def apply_rename_rules(name, rename_rules):
 def execute_with_retry(func, *args, **kwargs):
     """
     Enhanced retry mechanism with Exponential Backoff
-    This fixes the 'Freezing' issue on large folders.
     """
     func_name = getattr(func, '__name__', str(func))
     
@@ -233,7 +232,6 @@ def execute_with_retry(func, *args, **kwargs):
         try:
             return func(*args, **kwargs).execute()
         except HttpError as e:
-            # Calculate backoff: 5s, 10s, 20s, 40s, 80s
             wait_time = 5 * (2 ** attempt) 
             
             # 403: User Rate Limit Exceeded or 429: Too Many Requests
@@ -301,7 +299,6 @@ def copy_folder(service, folder_id, banned_data):
         logger.info(f"Phase 2: Adding watermark files to {len(subfolders)} subfolders...")
         for i, subfolder_id in enumerate(subfolders):
             copy_files_only(service, PHASE2_SOURCE, subfolder_id, banned_data, overwrite=True)
-            # Small sleep to prevent rate limits
             if i % 10 == 0: time.sleep(1)
 
         logger.info("Phase 3: Adding bonus content...")
@@ -671,7 +668,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error: {str(e)}")
         await context.bot.send_message(chat_id=update.effective_chat.id, text=f"⚠️ Error: {str(e)[:200]}")
 
-async def extract_folder_id(url):
+def extract_folder_id(url):
     patterns = [r'/folders/([a-zA-Z0-9-_]+)', r'[?&]id=([a-zA-Z0-9-_]+)', r'/folderview[?&]id=([a-zA-Z0-9-_]+)', r'/mobile/folders/([a-zA-Z0-9-_]+)', r'/mobile/folders/[^/]+/([a-zA-Z0-9-_]+)', r'/drive/u/\d+/mobile/folders/([a-zA-Z0-9-_]+)']
     for pattern in patterns:
         match = re.search(pattern, url)
