@@ -37,8 +37,8 @@ PING_INTERVAL = 25
 HEALTH_CHECK_ENDPOINT = "/health"
 
 # Constants
-MAX_RETRIES = 5  # Increased retries for stability
-CHUNK_SIZE = 20  # Number of files to process at once
+MAX_RETRIES = 5
+CHUNK_SIZE = 20
 
 # Authorization state
 AUTH_STATE = 1
@@ -53,7 +53,7 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
-# Silence the noisy libraries
+# Silence noisy libraries
 logging.getLogger('httpx').setLevel(logging.WARNING)
 logging.getLogger('aiohttp.access').setLevel(logging.WARNING)
 logging.getLogger('googleapiclient.discovery_cache').setLevel(logging.WARNING)
@@ -78,11 +78,7 @@ def get_drive_service():
 
 async def health_check(request):
     """Health check endpoint for Koyeb"""
-    return web.Response(
-        text=f"Bot is operational",
-        headers={"Content-Type": "text/plain"},
-        status=200
-    )
+    return web.Response(text=f"Bot is operational", status=200)
 
 async def root_handler(request):
     """Root endpoint handler"""
@@ -223,40 +219,30 @@ def apply_rename_rules(name, rename_rules):
     return name
 
 def execute_with_retry(func, *args, **kwargs):
-    """
-    Enhanced retry mechanism with Exponential Backoff
-    """
     func_name = getattr(func, '__name__', str(func))
-    
     for attempt in range(MAX_RETRIES):
         try:
             return func(*args, **kwargs).execute()
         except HttpError as e:
             wait_time = 5 * (2 ** attempt) 
-            
-            # 403: User Rate Limit Exceeded or 429: Too Many Requests
             if e.resp.status in [403, 429]:
-                logger.warning(f"⚠️ RATE LIMIT HIT in {func_name}. Waiting {wait_time}s before retry {attempt + 1}/{MAX_RETRIES}")
+                logger.warning(f"⚠️ RATE LIMIT in {func_name}. Waiting {wait_time}s...")
                 time.sleep(wait_time)
                 continue
-            
-            # 5xx: Server Errors
             if e.resp.status in [500, 502, 503, 504]:
                 logger.warning(f"⚠️ Server Error {e.resp.status} in {func_name}. Waiting {wait_time}s...")
                 time.sleep(wait_time)
                 continue
-                
             logger.error(f"API Error in {func_name}: {e}")
             raise
         except Exception as e:
             if attempt < MAX_RETRIES - 1:
                 wait_time = 5 * (2 ** attempt)
-                logger.warning(f"⚠️ Network/Unknown error in {func_name}. Retrying in {wait_time}s...")
+                logger.warning(f"⚠️ Network error in {func_name}. Retrying in {wait_time}s...")
                 time.sleep(wait_time)
                 continue
             logger.error(f"Critical error in {func_name}: {e}")
             raise
-            
     raise Exception(f"Operation {func_name} failed after {MAX_RETRIES} attempts.")
 
 def copy_file(service, file_id, banned_data):
@@ -290,10 +276,8 @@ def copy_folder(service, folder_id, banned_data):
         }).execute()
         new_folder_id = new_folder['id']
 
-        # Copy contents
         copy_folder_contents(service, folder_id, new_folder_id, banned_data)
         
-        # Phase 2 & 3
         subfolders = get_all_subfolders_recursive(service, new_folder_id)
         
         logger.info(f"Phase 2: Adding watermark files to {len(subfolders)} subfolders...")
@@ -320,11 +304,9 @@ def copy_folder(service, folder_id, banned_data):
 def get_all_subfolders_recursive(service, folder_id):
     subfolders = []
     queue = [folder_id]
-    
     while queue:
         current_folder = queue.pop(0)
         page_token = None
-        
         while True:
             try:
                 response = execute_with_retry(service.files().list,
@@ -333,11 +315,9 @@ def get_all_subfolders_recursive(service, folder_id):
                     pageSize=CHUNK_SIZE,
                     pageToken=page_token
                 )
-                
                 for folder in response.get('files', []):
                     subfolders.append(folder['id'])
                     queue.append(folder['id'])
-                
                 page_token = response.get('nextPageToken')
                 if not page_token: break
             except Exception as e:
@@ -355,14 +335,12 @@ def copy_files_only(service, source_id, dest_id, banned_data, overwrite=False):
                 pageSize=CHUNK_SIZE,
                 pageToken=page_token
             )
-            
             for item in response.get('files', []):
                 new_name = apply_rename_rules(item['name'], banned_data['rename_rules'])
                 if should_skip_item(new_name, item['mimeType'], item.get('size', 0), banned_data):
                     continue
                 if item['mimeType'] != 'application/vnd.google-apps.folder':
                     copy_item_to_folder(service, item, dest_id, banned_data, overwrite)
-            
             page_token = response.get('nextPageToken')
             if not page_token: break
         except Exception:
@@ -378,13 +356,11 @@ def copy_bonus_content(service, source_id, dest_id, banned_data, overwrite=False
                 pageSize=CHUNK_SIZE,
                 pageToken=page_token
             )
-            
             for item in response.get('files', []):
                 new_name = apply_rename_rules(item['name'], banned_data['rename_rules'])
                 if should_skip_item(new_name, item['mimeType'], item.get('size', 0), banned_data):
                     continue
                 copy_item_to_folder(service, item, dest_id, banned_data, overwrite)
-            
             page_token = response.get('nextPageToken')
             if not page_token: break
         except Exception:
@@ -393,7 +369,6 @@ def copy_bonus_content(service, source_id, dest_id, banned_data, overwrite=False
 def copy_item_to_folder(service, item, dest_folder_id, banned_data, overwrite=False):
     try:
         new_name = apply_rename_rules(item['name'], banned_data['rename_rules'])
-        
         if overwrite:
             existing = execute_with_retry(service.files().list,
                 q=f"name='{new_name}' and '{dest_folder_id}' in parents",
@@ -418,7 +393,6 @@ def copy_item_to_folder(service, item, dest_folder_id, banned_data, overwrite=Fa
         logger.error(f"Error copying {item['name']}: {str(e)}")
 
 def copy_folder_contents(service, source_id, dest_id, banned_data):
-    """Recursive copy with enhanced logging"""
     page_token = None
     while True:
         try:
@@ -428,14 +402,11 @@ def copy_folder_contents(service, source_id, dest_id, banned_data):
                 pageSize=CHUNK_SIZE,
                 pageToken=page_token
             )
-            
             files_list = response.get('files', [])
-            
             for item in files_list:
                 new_name = apply_rename_rules(item['name'], banned_data['rename_rules'])
                 if should_skip_item(new_name, item['mimeType'], item.get('size', 0), banned_data):
                     continue
-                    
                 if item['mimeType'] == 'application/vnd.google-apps.folder':
                     logger.info(f"Subfolder: {new_name}")
                     new_subfolder = service.files().create(body={
@@ -449,10 +420,8 @@ def copy_folder_contents(service, source_id, dest_id, banned_data):
                         fileId=item['id'],
                         body={'parents': [dest_id]}
                     ).execute()
-            
             page_token = response.get('nextPageToken')
-            if not page_token:
-                break
+            if not page_token: break
         except Exception as e:
             logger.error(f"Error in folder contents {source_id}: {str(e)}")
             break
@@ -467,20 +436,16 @@ def rename_files_and_folders(service, folder_id, rename_rules):
                 pageSize=CHUNK_SIZE,
                 pageToken=page_token
             )
-            
             for item in response.get('files', []):
                 try:
                     current_name = item['name']
                     new_name = apply_rename_rules(current_name, rename_rules)
-                    
                     at_pattern = re.compile(r'@\w+')
                     at_match = at_pattern.search(new_name)
-                    
                     if at_match:
                         new_name = at_pattern.sub('@TechZoneX', new_name)
                     elif item['mimeType'] == 'video/mp4' and new_name.endswith('.mp4'):
                         new_name = new_name.replace('.mp4', ' (Telegram@TechZoneX).mp4')
-                    
                     if new_name != current_name:
                         service.files().update(
                             fileId=item['id'],
@@ -488,13 +453,11 @@ def rename_files_and_folders(service, folder_id, rename_rules):
                         ).execute()
                 except Exception:
                     continue
-            
             page_token = response.get('nextPageToken')
             if not page_token: break
         except Exception:
             break
 
-# ... [Entity functions remain same: adjust_entity_offsets, filter_entities, apply_formatting] ...
 def adjust_entity_offsets(text, entities):
     if not entities: return []
     utf16_to_char = {}
@@ -532,44 +495,49 @@ def apply_formatting(text, entities):
         MessageEntity.TEXT_LINK: (lambda e: f'<a href="{e.url}">', '</a>'),
         "blockquote": ('<blockquote>', '</blockquote>')
     }
+    
     for entity in sorted_entities:
         entity_type = getattr(entity, 'type', None)
         if entity_type not in entity_tags: continue
+        
         start_tag, end_tag = entity_tags[entity_type]
         if callable(start_tag): start_tag = start_tag(entity)
+        
         start = entity.offset
         end = start + entity.length
+        
         if start >= text_length or end > text_length: continue
+        
         before = ''.join(chars[:start])
         content = ''.join(chars[start:end])
         after = ''.join(chars[end:])
-        if entity_type == "blockquote":
-            content = content.replace('<b>', '').replace('</b>', '').replace('<i>', '').replace('</i>', '')
+        
+        # We do NOT strip internal tags anymore to allow nested formatting
         chars = list(before + start_tag + content + end_tag + after)
         text_length = len(chars)
+    
     formatted_text = ''.join(chars)
-    if ">" in formatted_text:
-        formatted_text = formatted_text.replace("&gt;", ">")
-        lines = formatted_text.split('\n')
-        formatted_lines = []
-        in_blockquote = False
-        for line in lines:
-            if line.startswith('>'):
-                if not in_blockquote:
-                    formatted_lines.append('<blockquote>')
-                    in_blockquote = True
-                formatted_lines.append(line[1:].strip())
-            else:
-                if in_blockquote:
-                    formatted_lines.append('</blockquote>')
-                    in_blockquote = False
-                formatted_lines.append(line)
-        if in_blockquote: formatted_lines.append('</blockquote>')
-        formatted_text = '\n'.join(formatted_lines)
-    formatted_text = formatted_text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+    # Re-escape only necessary chars, keeping our inserted tags intact
+    formatted_text = formatted_text.replace('&', '&amp;')
+    # We must not double escape < and > if they are part of our tags
+    # The simplest way is to temporary placeholder our tags, escape, then restore
+    # BUT, since we built the string with known safe tags, we can just replace the *original* < and > 
+    # This is tricky because the original text might have <. 
+    # A safer approach is to not escape here and rely on Telegram to parse valid HTML, 
+    # but Telegram requires < to be &lt; if it's text.
+    
+    # Correction: The standard way is to escape the TEXT first, THEN apply entities.
+    # But since we are modifying offsets, that's hard.
+    # The current approach replaces &lt; back to < for our specific tags.
+    
+    formatted_text = formatted_text.replace('<', '&lt;').replace('>', '&gt;')
     html_tags = ['b', 'i', 'u', 's', 'code', 'pre', 'a', 'tg-spoiler', 'blockquote']
     for tag in html_tags:
         formatted_text = formatted_text.replace(f'&lt;{tag}&gt;', f'<{tag}>').replace(f'&lt;/{tag}&gt;', f'</{tag}>')
+        # Handle links separately because they have attributes
+        if tag == 'a':
+            formatted_text = re.sub(r'&lt;a href="(.*?)"&gt;', r'<a href="\1">', formatted_text)
+            
     return formatted_text
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
