@@ -1,7 +1,6 @@
 import re
 import os
 import io
-import html
 import random
 import asyncio
 import traceback
@@ -27,6 +26,7 @@ TOKEN_PATH = 'token.json'
 CREDENTIALS_PATH = 'credentials.json'
 PHASE2_SOURCE = '1ixJU6s6bKbzIdsbjKDKrZYLt1nl_TSul'
 PHASE3_SOURCE = '1iM6ghIcYsx1gIvfdjm-HjCRW3MWy0JCP'
+# Short links removed as requested
 TARGET_CHANNEL = "@techworld196"
 BANNED_FILE_ID = '1r2BpwG9isOkKjL5tYj3WqqiF5w4oWpCY'
 SCOPES = ['https://www.googleapis.com/auth/drive']
@@ -53,7 +53,6 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
-# Silence noisy libraries
 logging.getLogger('httpx').setLevel(logging.WARNING)
 logging.getLogger('aiohttp.access').setLevel(logging.WARNING)
 logging.getLogger('googleapiclient.discovery_cache').setLevel(logging.WARNING)
@@ -77,15 +76,12 @@ def get_drive_service():
     return build('drive', 'v3', credentials=creds)
 
 async def health_check(request):
-    """Health check endpoint for Koyeb"""
     return web.Response(text=f"Bot is operational", status=200)
 
 async def root_handler(request):
-    """Root endpoint handler"""
     return web.Response(text="Bot is running", status=200)
 
 async def self_ping():
-    """Keep-alive mechanism"""
     while True:
         try:
             async with aiohttp.ClientSession() as session:
@@ -96,29 +92,22 @@ async def self_ping():
         await asyncio.sleep(PING_INTERVAL)
 
 async def run_webserver():
-    """Run the web server"""
     app = web.Application()
     app.router.add_get(HEALTH_CHECK_ENDPOINT, health_check)
     app.router.add_get("/", root_handler)
-    
     global runner, site
     runner = web.AppRunner(app)
     await runner.setup()
-    
     site = web.TCPSite(runner, '0.0.0.0', WEB_PORT)
     await site.start()
     logger.info(f"Health check server running on port {WEB_PORT}")
 
 async def auth_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Start Google Drive authorization process"""
     flow = InstalledAppFlow.from_client_secrets_file(
-        CREDENTIALS_PATH,
-        scopes=SCOPES,
-        redirect_uri='http://localhost:8080'
+        CREDENTIALS_PATH, scopes=SCOPES, redirect_uri='http://localhost:8080'
     )
     auth_url, _ = flow.authorization_url(prompt='consent')
     pending_authorizations[update.effective_user.id] = flow
-    
     await update.message.reply_text(
         f"[Authorize Google Drive]({auth_url})\n\nSend me the redirected URL.",
         parse_mode='Markdown',
@@ -127,10 +116,8 @@ async def auth_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return AUTH_STATE
 
 async def handle_auth_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle received authorization code"""
     user_id = update.effective_user.id
     text = update.message.text.strip()
-    
     code = None
     if 'code=' in text:
         code = text.split('code=')[1].split('&')[0]
@@ -145,15 +132,12 @@ async def handle_auth_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
         flow = pending_authorizations[user_id]
         flow.fetch_token(code=code)
         creds = flow.credentials
-        
         with open(TOKEN_PATH, 'w') as token_file:
             token_file.write(creds.to_json())
-        
         del pending_authorizations[user_id]
         await update.message.reply_text("✅ Authorization successful!")
     except Exception as e:
         await update.message.reply_text(f"❌ Failed: {str(e)}")
-    
     return ConversationHandler.END
 
 async def cancel_auth(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -167,10 +151,8 @@ def initialize_banned_items(service):
     try:
         request = service.files().get_media(fileId=BANNED_FILE_ID)
         banned_file = request.execute().decode('utf-8')
-        
         sections = banned_file.split('\n\n')
         banned_data = {'names': [], 'size_types': [], 'rename_rules': []}
-        
         for section in sections:
             if section.startswith('#BANNED_NAMES'):
                 banned_data['names'] = section.split('\n')[1:]
@@ -178,7 +160,6 @@ def initialize_banned_items(service):
                 banned_data['size_types'] = section.split('\n')[1:]
             elif section.startswith('#RENAME_RULES'):
                 banned_data['rename_rules'] = section.split('\n')[1:]
-        
         return banned_data
     except Exception as e:
         logger.error(f"Error loading banned items: {str(e)}")
@@ -187,13 +168,9 @@ def initialize_banned_items(service):
 def save_banned_items(service, banned_data):
     try:
         content = ""
-        if banned_data['names']:
-            content += "#BANNED_NAMES\n" + "\n".join(banned_data['names']) + "\n\n"
-        if banned_data['size_types']:
-            content += "#BANNED_SIZE_TYPE\n" + "\n".join(banned_data['size_types']) + "\n\n"
-        if banned_data['rename_rules']:
-            content += "#RENAME_RULES\n" + "\n".join(banned_data['rename_rules'])
-        
+        if banned_data['names']: content += "#BANNED_NAMES\n" + "\n".join(banned_data['names']) + "\n\n"
+        if banned_data['size_types']: content += "#BANNED_SIZE_TYPE\n" + "\n".join(banned_data['size_types']) + "\n\n"
+        if banned_data['rename_rules']: content += "#RENAME_RULES\n" + "\n".join(banned_data['rename_rules'])
         media = MediaIoBaseUpload(io.BytesIO(content.strip().encode('utf-8')), mimetype='text/plain')
         service.files().update(fileId=BANNED_FILE_ID, media_body=media).execute()
         logger.info("Banned items saved.")
@@ -204,7 +181,6 @@ def should_skip_item(name, mime_type, size, banned_data):
     if name in banned_data['names']:
         logger.info(f"Skipping banned name: {name}")
         return True
-    
     size_type_str = f"{size}:{mime_type}"
     if size_type_str in banned_data['size_types']:
         logger.info(f"Skipping banned size/type: {size_type_str}")
@@ -249,12 +225,9 @@ def copy_file(service, file_id, banned_data):
     try:
         logger.info(f"STEP: Processing single file {file_id}")
         file = execute_with_retry(service.files().get, fileId=file_id, fields='name,mimeType,size')
-        
         new_name = apply_rename_rules(file['name'], banned_data['rename_rules'])
-        
         if should_skip_item(new_name, file['mimeType'], file.get('size', 0), banned_data):
             raise Exception(f"File {new_name} is banned")
-            
         copied_file = service.files().copy(fileId=file_id).execute()
         logger.info(f"File copied: {new_name}")
         return copied_file['id']
@@ -266,18 +239,12 @@ def copy_folder(service, folder_id, banned_data):
     try:
         logger.info(f"STEP: Starting folder copy: {folder_id}")
         folder = execute_with_retry(service.files().get, fileId=folder_id, fields='name')
-        
         new_folder_name = apply_rename_rules(folder['name'], banned_data['rename_rules'])
         logger.info(f"Creating root folder: {new_folder_name}")
-        
-        new_folder = service.files().create(body={
-            'name': new_folder_name,
-            'mimeType': 'application/vnd.google-apps.folder'
-        }).execute()
+        new_folder = service.files().create(body={'name': new_folder_name, 'mimeType': 'application/vnd.google-apps.folder'}).execute()
         new_folder_id = new_folder['id']
 
         copy_folder_contents(service, folder_id, new_folder_id, banned_data)
-        
         subfolders = get_all_subfolders_recursive(service, new_folder_id)
         
         logger.info(f"Phase 2: Adding watermark files to {len(subfolders)} subfolders...")
@@ -309,12 +276,7 @@ def get_all_subfolders_recursive(service, folder_id):
         page_token = None
         while True:
             try:
-                response = execute_with_retry(service.files().list,
-                    q=f"'{current_folder}' in parents and mimeType='application/vnd.google-apps.folder'",
-                    fields='nextPageToken, files(id)',
-                    pageSize=CHUNK_SIZE,
-                    pageToken=page_token
-                )
+                response = execute_with_retry(service.files().list, q=f"'{current_folder}' in parents and mimeType='application/vnd.google-apps.folder'", fields='nextPageToken, files(id)', pageSize=CHUNK_SIZE, pageToken=page_token)
                 for folder in response.get('files', []):
                     subfolders.append(folder['id'])
                     queue.append(folder['id'])
@@ -329,97 +291,57 @@ def copy_files_only(service, source_id, dest_id, banned_data, overwrite=False):
     page_token = None
     while True:
         try:
-            response = execute_with_retry(service.files().list,
-                q=f"'{source_id}' in parents",
-                fields='nextPageToken, files(id, name, mimeType, size)',
-                pageSize=CHUNK_SIZE,
-                pageToken=page_token
-            )
+            response = execute_with_retry(service.files().list, q=f"'{source_id}' in parents", fields='nextPageToken, files(id, name, mimeType, size)', pageSize=CHUNK_SIZE, pageToken=page_token)
             for item in response.get('files', []):
                 new_name = apply_rename_rules(item['name'], banned_data['rename_rules'])
-                if should_skip_item(new_name, item['mimeType'], item.get('size', 0), banned_data):
-                    continue
+                if should_skip_item(new_name, item['mimeType'], item.get('size', 0), banned_data): continue
                 if item['mimeType'] != 'application/vnd.google-apps.folder':
                     copy_item_to_folder(service, item, dest_id, banned_data, overwrite)
             page_token = response.get('nextPageToken')
             if not page_token: break
-        except Exception:
-            break
+        except Exception: break
 
 def copy_bonus_content(service, source_id, dest_id, banned_data, overwrite=False):
     page_token = None
     while True:
         try:
-            response = execute_with_retry(service.files().list,
-                q=f"'{source_id}' in parents",
-                fields='nextPageToken, files(id, name, mimeType, size)',
-                pageSize=CHUNK_SIZE,
-                pageToken=page_token
-            )
+            response = execute_with_retry(service.files().list, q=f"'{source_id}' in parents", fields='nextPageToken, files(id, name, mimeType, size)', pageSize=CHUNK_SIZE, pageToken=page_token)
             for item in response.get('files', []):
                 new_name = apply_rename_rules(item['name'], banned_data['rename_rules'])
-                if should_skip_item(new_name, item['mimeType'], item.get('size', 0), banned_data):
-                    continue
+                if should_skip_item(new_name, item['mimeType'], item.get('size', 0), banned_data): continue
                 copy_item_to_folder(service, item, dest_id, banned_data, overwrite)
             page_token = response.get('nextPageToken')
             if not page_token: break
-        except Exception:
-            break
+        except Exception: break
 
 def copy_item_to_folder(service, item, dest_folder_id, banned_data, overwrite=False):
     try:
         new_name = apply_rename_rules(item['name'], banned_data['rename_rules'])
         if overwrite:
-            existing = execute_with_retry(service.files().list,
-                q=f"name='{new_name}' and '{dest_folder_id}' in parents",
-                fields='files(id)'
-            ).get('files', [])
-            for file in existing:
-                execute_with_retry(service.files().delete, fileId=file['id'])
-
+            existing = execute_with_retry(service.files().list, q=f"name='{new_name}' and '{dest_folder_id}' in parents", fields='files(id)').get('files', [])
+            for file in existing: execute_with_retry(service.files().delete, fileId=file['id'])
         if item['mimeType'] == 'application/vnd.google-apps.folder':
-            new_folder = service.files().create(body={
-                'name': new_name,
-                'parents': [dest_folder_id],
-                'mimeType': 'application/vnd.google-apps.folder'
-            }).execute()
+            new_folder = service.files().create(body={'name': new_name, 'parents': [dest_folder_id], 'mimeType': 'application/vnd.google-apps.folder'}).execute()
             copy_bonus_content(service, item['id'], new_folder['id'], banned_data, overwrite)
         else:
-            service.files().copy(
-                fileId=item['id'],
-                body={'parents': [dest_folder_id]}
-            ).execute()
-    except Exception as e:
-        logger.error(f"Error copying {item['name']}: {str(e)}")
+            service.files().copy(fileId=item['id'], body={'parents': [dest_folder_id]}).execute()
+    except Exception as e: logger.error(f"Error copying {item['name']}: {str(e)}")
 
 def copy_folder_contents(service, source_id, dest_id, banned_data):
     page_token = None
     while True:
         try:
-            response = execute_with_retry(service.files().list,
-                q=f"'{source_id}' in parents",
-                fields='nextPageToken, files(id, name, mimeType, size)',
-                pageSize=CHUNK_SIZE,
-                pageToken=page_token
-            )
+            response = execute_with_retry(service.files().list, q=f"'{source_id}' in parents", fields='nextPageToken, files(id, name, mimeType, size)', pageSize=CHUNK_SIZE, pageToken=page_token)
             files_list = response.get('files', [])
             for item in files_list:
                 new_name = apply_rename_rules(item['name'], banned_data['rename_rules'])
-                if should_skip_item(new_name, item['mimeType'], item.get('size', 0), banned_data):
-                    continue
+                if should_skip_item(new_name, item['mimeType'], item.get('size', 0), banned_data): continue
                 if item['mimeType'] == 'application/vnd.google-apps.folder':
                     logger.info(f"Subfolder: {new_name}")
-                    new_subfolder = service.files().create(body={
-                        'name': new_name,
-                        'parents': [dest_id],
-                        'mimeType': 'application/vnd.google-apps.folder'
-                    }).execute()
+                    new_subfolder = service.files().create(body={'name': new_name, 'parents': [dest_id], 'mimeType': 'application/vnd.google-apps.folder'}).execute()
                     copy_folder_contents(service, item['id'], new_subfolder['id'], banned_data)
                 else:
-                    service.files().copy(
-                        fileId=item['id'],
-                        body={'parents': [dest_id]}
-                    ).execute()
+                    service.files().copy(fileId=item['id'], body={'parents': [dest_id]}).execute()
             page_token = response.get('nextPageToken')
             if not page_token: break
         except Exception as e:
@@ -430,33 +352,34 @@ def rename_files_and_folders(service, folder_id, rename_rules):
     page_token = None
     while True:
         try:
-            response = execute_with_retry(service.files().list,
-                q=f"'{folder_id}' in parents",
-                fields='nextPageToken, files(id, name, mimeType)',
-                pageSize=CHUNK_SIZE,
-                pageToken=page_token
-            )
+            response = execute_with_retry(service.files().list, q=f"'{folder_id}' in parents", fields='nextPageToken, files(id, name, mimeType)', pageSize=CHUNK_SIZE, pageToken=page_token)
             for item in response.get('files', []):
                 try:
                     current_name = item['name']
                     new_name = apply_rename_rules(current_name, rename_rules)
                     at_pattern = re.compile(r'@\w+')
                     at_match = at_pattern.search(new_name)
-                    if at_match:
-                        new_name = at_pattern.sub('@TechZoneX', new_name)
-                    elif item['mimeType'] == 'video/mp4' and new_name.endswith('.mp4'):
-                        new_name = new_name.replace('.mp4', ' (Telegram@TechZoneX).mp4')
-                    if new_name != current_name:
-                        service.files().update(
-                            fileId=item['id'],
-                            body={'name': new_name}
-                        ).execute()
-                except Exception:
-                    continue
+                    if at_match: new_name = at_pattern.sub('@TechZoneX', new_name)
+                    elif item['mimeType'] == 'video/mp4' and new_name.endswith('.mp4'): new_name = new_name.replace('.mp4', ' (Telegram@TechZoneX).mp4')
+                    if new_name != current_name: service.files().update(fileId=item['id'], body={'name': new_name}).execute()
+                except Exception: continue
             page_token = response.get('nextPageToken')
             if not page_token: break
-        except Exception:
-            break
+        except Exception: break
+
+def extract_folder_id(url):
+    patterns = [r'/folders/([a-zA-Z0-9-_]+)', r'[?&]id=([a-zA-Z0-9-_]+)', r'/folderview[?&]id=([a-zA-Z0-9-_]+)', r'/mobile/folders/([a-zA-Z0-9-_]+)', r'/mobile/folders/[^/]+/([a-zA-Z0-9-_]+)', r'/drive/u/\d+/mobile/folders/([a-zA-Z0-9-_]+)']
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match: return match.group(1)
+    return None
+
+def extract_file_id(url):
+    patterns = [r'/file/d/([a-zA-Z0-9-_]+)', r'/open\?id=([a-zA-Z0-9-_]+)', r'/uc\?id=([a-zA-Z0-9-_]+)', r'/mobile\?id=([a-zA-Z0-9-_]+)']
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match: return match.group(1)
+    return None
 
 def adjust_entity_offsets(text, entities):
     if not entities: return []
@@ -480,6 +403,7 @@ def filter_entities(entities):
     return [e for e in entities if getattr(e, 'type', None) in allowed_types] if entities else []
 
 def apply_formatting(text, entities):
+    """Restored Original Logic with safer blockquote handling"""
     if not text: return text
     chars = list(text)
     text_length = len(chars)
@@ -506,13 +430,15 @@ def apply_formatting(text, entities):
         before = ''.join(chars[:start])
         content = ''.join(chars[start:end])
         after = ''.join(chars[end:])
-        if entity_type == "blockquote":
-            content = content.replace('<b>', '').replace('</b>', '').replace('<i>', '').replace('</i>', '')
+        # NOTE: previously we stripped formatting tags inside blockquotes here which caused mismatches.
+        # We now KEEP inner formatting intact to preserve tag balance.
         chars = list(before + start_tag + content + end_tag + after)
         text_length = len(chars)
     
+    # Manual Blockquote Handling (restored)
     formatted_text = ''.join(chars)
     if ">" in formatted_text:
+        # Convert any escaped blockquote markers back to literal '>' for detection
         formatted_text = formatted_text.replace("&gt;", ">")
         lines = formatted_text.split('\n')
         formatted_lines = []
@@ -522,6 +448,7 @@ def apply_formatting(text, entities):
                 if not in_blockquote:
                     formatted_lines.append('<blockquote>')
                     in_blockquote = True
+                # keep inner formatting tags intact
                 formatted_lines.append(line[1:].strip())
             else:
                 if in_blockquote:
@@ -531,6 +458,7 @@ def apply_formatting(text, entities):
         if in_blockquote: formatted_lines.append('</blockquote>')
         formatted_text = '\n'.join(formatted_lines)
     
+    # Escape everything, then unescape allowed tags
     formatted_text = formatted_text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
     html_tags = ['b', 'i', 'u', 's', 'code', 'pre', 'a', 'tg-spoiler', 'blockquote']
     for tag in html_tags:
@@ -539,26 +467,83 @@ def apply_formatting(text, entities):
 
 def close_dangling_tags(html_text):
     """
-    Fixes nested tag errors like <blockquote>...</b>
+    Scans HTML and closes any tags that were left open (e.g. by truncation or blockquote logic).
+    Also ignores unmatched closing tags to avoid 'unmatched end tag' errors.
+    This implementation builds the output progressively and avoids leaving unmatched closers.
     """
-    tags_stack = []
-    # Match tag names like b, i, blockquote, etc.
-    matches = re.finditer(r'</?([a-z-]+)[^>]*>', html_text)
-    
-    for m in matches:
-        tag_full = m.group(0)
-        tag_name = m.group(1)
-        
-        if tag_full.startswith('</'):
-            if tags_stack and tags_stack[-1] == tag_name:
-                tags_stack.pop()
-        elif not tag_full.endswith('/>'):
-            tags_stack.append(tag_name)
-    
-    for tag in reversed(tags_stack):
-        html_text += f'</{tag}>'
-    
-    return html_text
+    # We'll parse through html_text and reconstruct a balanced version
+    tag_regex = re.compile(r'(<!--.*?-->|</?[a-zA-Z][a-zA-Z0-9\-]*(?:\s[^>]*)?>)', re.DOTALL)
+    pos = 0
+    out_parts = []
+    stack = []  # stack of open tag names
+
+    for m in tag_regex.finditer(html_text):
+        start, end = m.span()
+        # append text before the tag
+        before = html_text[pos:start]
+        if before:
+            out_parts.append(before)
+        tag_full = m.group(1)
+        pos = end
+
+        # Ignore HTML comments as-is
+        if tag_full.startswith('<!--'):
+            out_parts.append(tag_full)
+            continue
+
+        # Determine if self-closing
+        if tag_full.endswith('/>'):
+            out_parts.append(tag_full)
+            continue
+
+        # Is it a closing tag?
+        closing_match = re.match(r'</\s*([a-zA-Z0-9\-]+)\s*>', tag_full)
+        if closing_match:
+            tag_name = closing_match.group(1)
+            if stack and stack[-1] == tag_name:
+                # Normal closing for last opened
+                stack.pop()
+                out_parts.append(tag_full)
+            else:
+                # Unmatched closer: try to find it in the stack
+                if tag_name in stack:
+                    # Close intermediate tags first (insert explicit closers), then close this tag
+                    # pop until we reach the tag_name
+                    temp = []
+                    while stack and stack[-1] != tag_name:
+                        t = stack.pop()
+                        temp.append(t)
+                        out_parts.append(f'</{t}>')
+                    if stack and stack[-1] == tag_name:
+                        stack.pop()
+                        out_parts.append(tag_full)
+                    # any temp were already closed
+                else:
+                    # Completely unmatched closing tag -> skip it to avoid breaking structure
+                    # (do not append it)
+                    continue
+        else:
+            # Opening tag: capture the name and push to stack and append
+            open_match = re.match(r'<\s*([a-zA-Z0-9\-]+)(?:\s[^>]*)?>', tag_full)
+            if open_match:
+                tag_name = open_match.group(1)
+                stack.append(tag_name)
+                out_parts.append(tag_full)
+            else:
+                # malformed tag; append as-is
+                out_parts.append(tag_full)
+
+    # append any trailing text after last tag
+    tail = html_text[pos:]
+    if tail:
+        out_parts.append(tail)
+
+    # Close any still-open tags in reverse order
+    while stack:
+        t = stack.pop()
+        out_parts.append(f'</{t}>')
+
+    return ''.join(out_parts)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
@@ -566,14 +551,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     logger.info("New message received.")
     
+    # 1. Start with original text and entities
     original_text = message.caption or message.text or ''
+    # Convert utf-16 offsets to char offsets immediately
     original_entities = adjust_entity_offsets(original_text, filter_entities(message.caption_entities if message.caption else message.entities))
     
     final_text = original_text
-    final_entities = []
-    # Copy entities correctly
-    for e in original_entities:
-        final_entities.append(MessageEntity(e.type, e.offset, e.length, url=e.url, user=e.user, language=e.language, custom_emoji_id=e.custom_emoji_id))
+    final_entities = original_entities
     
     drive_links = []
 
@@ -589,6 +573,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             logger.info(f"Found {len(url_matches)} Drive links.")
             
+            # We process matches in reverse order so replacements don't mess up earlier indices
+            # But here we just build a list of replacements
             replacements = []
 
             for match in url_matches:
@@ -621,42 +607,72 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if new_url:
                     replacements.append((match.start(), match.end(), new_url))
             
+            # Apply replacements and update entities manually
+            # We sort replacements by start index to process sequentially
             replacements.sort(key=lambda x: x[0])
             
+            offset_shift = 0
+            
+            # Create a new list for modified entities
+            current_entities = []
+            # We clone existing entities to safe objects
+            for e in final_entities:
+                current_entities.append(MessageEntity(e.type, e.offset, e.length, url=e.url, user=e.user, language=e.language, custom_emoji_id=e.custom_emoji_id))
+            
+            # Reconstruct text
             new_text_builder = ""
             last_idx = 0
             
-            # Rebuild text and shift entities
             for start, end, new_str in replacements:
+                # Add chunk before link
                 new_text_builder += original_text[last_idx:start]
+                # Add new link
                 new_text_builder += new_str
+                
+                # Calculate shift for this specific replacement
                 diff = len(new_str) - (end - start)
+                
                 last_idx = end
                 
-                for ent in final_entities:
+                # Apply shift to entities
+                for ent in current_entities:
+                    # Entity starts after this link (original position)
                     if ent.offset >= end:
                         ent.offset += diff
+                    # Entity covers this link (starts before, ends after)
                     elif ent.offset <= start and (ent.offset + ent.length) >= end:
                         ent.length += diff
                 
             new_text_builder += original_text[last_idx:]
             final_text = new_text_builder
+            final_entities = current_entities
 
+            # Truncation: Find the LAST replaced link in the final text
             if replacements:
+                # The last replacement in the list corresponds to the last link
+                # We need to find where that link ended up in final_text
+                # Since we rebuilt final_text, we can just search for the URL?
+                # Or cleaner: Just find the last occurrence of the last new_url
                 last_new_url = replacements[-1][2]
                 trunc_pos = final_text.rfind(last_new_url) + len(last_new_url)
                 
                 if trunc_pos > len(last_new_url):
                      final_text = final_text[:trunc_pos]
+                     
+                     # Filter entities that are now out of bounds
                      valid_entities = []
                      for ent in final_entities:
-                         if ent.offset >= trunc_pos: continue 
+                         if ent.offset >= trunc_pos:
+                             continue # Remove entity
                          if (ent.offset + ent.length) > trunc_pos:
-                             ent.length = trunc_pos - ent.offset
+                             ent.length = trunc_pos - ent.offset # Clamp entity
                          valid_entities.append(ent)
                      final_entities = valid_entities
 
+        # Now apply formatting using the updated text and entities
         formatted_html = apply_formatting(final_text, final_entities)
+        
+        # FINAL SAFETY NET: Close any tags that got broken
         formatted_html = close_dangling_tags(formatted_html)
 
         send_args = {
@@ -816,5 +832,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-
