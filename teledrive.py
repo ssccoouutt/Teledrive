@@ -1,6 +1,7 @@
 import re
 import os
 import io
+import html
 import random
 import asyncio
 import traceback
@@ -10,7 +11,7 @@ import logging
 import signal
 from datetime import datetime
 from aiohttp import web
-from telegram import Update, MessageEntity
+from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
 from google.oauth2.credentials import Credentials
@@ -458,96 +459,32 @@ def rename_files_and_folders(service, folder_id, rename_rules):
         except Exception:
             break
 
-def adjust_entity_offsets(text, entities):
-    if not entities: return []
-    utf16_to_char = {}
-    char_pos = 0
-    utf16_pos = 0
-    for char in text:
-        utf16_to_char[utf16_pos] = char_pos
-        utf16_pos += len(char.encode('utf-16-le')) // 2
-        char_pos += 1
-    adjusted_entities = []
-    for entity in entities:
-        start = utf16_to_char.get(entity.offset, entity.offset)
-        end = utf16_to_char.get(entity.offset + entity.length, entity.offset + entity.length)
-        new_entity = MessageEntity(type=entity.type, offset=start, length=end - start, url=entity.url, user=entity.user, language=entity.language, custom_emoji_id=entity.custom_emoji_id)
-        adjusted_entities.append(new_entity)
-    return adjusted_entities
+def extract_folder_id(url):
+    patterns = [r'/folders/([a-zA-Z0-9-_]+)', r'[?&]id=([a-zA-Z0-9-_]+)', r'/folderview[?&]id=([a-zA-Z0-9-_]+)', r'/mobile/folders/([a-zA-Z0-9-_]+)', r'/mobile/folders/[^/]+/([a-zA-Z0-9-_]+)', r'/drive/u/\d+/mobile/folders/([a-zA-Z0-9-_]+)']
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match: return match.group(1)
+    return None
 
-def filter_entities(entities):
-    allowed_types = {MessageEntity.BOLD, MessageEntity.ITALIC, MessageEntity.CODE, MessageEntity.PRE, MessageEntity.UNDERLINE, MessageEntity.STRIKETHROUGH, MessageEntity.TEXT_LINK, MessageEntity.SPOILER, "blockquote"}
-    return [e for e in entities if getattr(e, 'type', None) in allowed_types] if entities else []
-
-def apply_formatting(text, entities):
-    if not text: return text
-    chars = list(text)
-    text_length = len(chars)
-    sorted_entities = sorted(entities or [], key=lambda e: -e.offset)
-    entity_tags = {
-        MessageEntity.BOLD: ('<b>', '</b>'),
-        MessageEntity.ITALIC: ('<i>', '</i>'),
-        MessageEntity.UNDERLINE: ('<u>', '</u>'),
-        MessageEntity.STRIKETHROUGH: ('<s>', '</s>'),
-        MessageEntity.SPOILER: ('<tg-spoiler>', '</tg-spoiler>'),
-        MessageEntity.CODE: ('<code>', '</code>'),
-        MessageEntity.PRE: ('<pre>', '</pre>'),
-        MessageEntity.TEXT_LINK: (lambda e: f'<a href="{e.url}">', '</a>'),
-        "blockquote": ('<blockquote>', '</blockquote>')
-    }
-    
-    for entity in sorted_entities:
-        entity_type = getattr(entity, 'type', None)
-        if entity_type not in entity_tags: continue
-        
-        start_tag, end_tag = entity_tags[entity_type]
-        if callable(start_tag): start_tag = start_tag(entity)
-        
-        start = entity.offset
-        end = start + entity.length
-        
-        if start >= text_length or end > text_length: continue
-        
-        before = ''.join(chars[:start])
-        content = ''.join(chars[start:end])
-        after = ''.join(chars[end:])
-        
-        # We do NOT strip internal tags anymore to allow nested formatting
-        chars = list(before + start_tag + content + end_tag + after)
-        text_length = len(chars)
-    
-    formatted_text = ''.join(chars)
-    # Re-escape only necessary chars, keeping our inserted tags intact
-    formatted_text = formatted_text.replace('&', '&amp;')
-    # We must not double escape < and > if they are part of our tags
-    # The simplest way is to temporary placeholder our tags, escape, then restore
-    # BUT, since we built the string with known safe tags, we can just replace the *original* < and > 
-    # This is tricky because the original text might have <. 
-    # A safer approach is to not escape here and rely on Telegram to parse valid HTML, 
-    # but Telegram requires < to be &lt; if it's text.
-    
-    # Correction: The standard way is to escape the TEXT first, THEN apply entities.
-    # But since we are modifying offsets, that's hard.
-    # The current approach replaces &lt; back to < for our specific tags.
-    
-    formatted_text = formatted_text.replace('<', '&lt;').replace('>', '&gt;')
-    html_tags = ['b', 'i', 'u', 's', 'code', 'pre', 'a', 'tg-spoiler', 'blockquote']
-    for tag in html_tags:
-        formatted_text = formatted_text.replace(f'&lt;{tag}&gt;', f'<{tag}>').replace(f'&lt;/{tag}&gt;', f'</{tag}>')
-        # Handle links separately because they have attributes
-        if tag == 'a':
-            formatted_text = re.sub(r'&lt;a href="(.*?)"&gt;', r'<a href="\1">', formatted_text)
-            
-    return formatted_text
+def extract_file_id(url):
+    patterns = [r'/file/d/([a-zA-Z0-9-_]+)', r'/open\?id=([a-zA-Z0-9-_]+)', r'/uc\?id=([a-zA-Z0-9-_]+)', r'/mobile\?id=([a-zA-Z0-9-_]+)']
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match: return match.group(1)
+    return None
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     if not message or (message.text and message.text.startswith('/')): return
     
     logger.info("New message received.")
+    
+    # Use Telegram's HTML generator to get valid HTML source
+    # This handles all entity nesting correctly automatically
+    html_content = message.caption_html or message.text_html or message.caption or message.text or ''
     original_text = message.caption or message.text or ''
-    original_entities = message.caption_entities if message.caption else message.entities
-    drive_links = []
+    
+    drive_links_found = False
 
     try:
         drive_service = get_drive_service()
@@ -567,16 +504,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 folder_id = extract_folder_id(url)
                 file_id = extract_file_id(url)
                 
+                # Perform the copy operation
+                new_id = None
                 if folder_id:
                     try:
                         logger.info(f"Found FOLDER {folder_id}. Starting task...")
-                        new_folder_id = await asyncio.get_event_loop().run_in_executor(
+                        new_id = await asyncio.get_event_loop().run_in_executor(
                             None, copy_folder, drive_service, folder_id, banned_data
                         )
-                        random_link = random.choice(SHORT_LINKS)
-                        new_url = f'https://drive.google.com/drive/folders/{new_folder_id} {random_link}'
-                        drive_links.append((url, new_url))
-                        original_text = original_text.replace(url, new_url)
+                        new_url = f'https://drive.google.com/drive/folders/{new_id}'
                     except Exception as e:
                         logger.error(f"Error folder {url}: {str(e)}")
                         await message.reply_text(f"⚠️ Error: {str(e)}")
@@ -584,29 +520,33 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 elif file_id:
                     try:
                         logger.info(f"Found FILE {file_id}. Starting task...")
-                        new_file_id = await asyncio.get_event_loop().run_in_executor(
+                        new_id = await asyncio.get_event_loop().run_in_executor(
                             None, copy_file, drive_service, file_id, banned_data
                         )
-                        random_link = random.choice(SHORT_LINKS)
-                        new_url = f'https://drive.google.com/file/d/{new_file_id}/view?usp=sharing {random_link}'
-                        drive_links.append((url, new_url))
-                        original_text = original_text.replace(url, new_url)
+                        new_url = f'https://drive.google.com/file/d/{new_id}/view?usp=sharing'
                     except Exception as e:
                         logger.error(f"Error file {url}: {str(e)}")
                         await message.reply_text(f"⚠️ Error: {str(e)}")
                         continue
 
-            if drive_links:
-                last_pos = original_text.rfind(drive_links[-1][1]) + len(drive_links[-1][1])
-                final_text = original_text[:last_pos].strip()
-            else:
-                final_text = original_text
+                # If successful, replace the link in the HTML content
+                if new_id:
+                    drive_links_found = True
+                    random_link = random.choice(SHORT_LINKS)
+                    full_new_string = f'{new_url} {random_link}'
+                    
+                    # We use html.escape(url) to ensure we match the URL as it appears in the HTML source
+                    # (e.g. replacing & with &amp;)
+                    escaped_old_url = html.escape(url)
+                    
+                    # Replace in the HTML content
+                    html_content = html_content.replace(escaped_old_url, full_new_string)
 
-            filtered_entities = filter_entities(original_entities)
-            adjusted_entities = adjust_entity_offsets(final_text, filtered_entities)
-            formatted_text = apply_formatting(final_text, adjusted_entities)
-        else:
-            formatted_text = ''
+            # If we processed links, strip content after the last link (legacy behavior)
+            # but doing this on HTML is risky.
+            # The original logic was: last_pos = original_text.rfind(...)
+            # Since we are using valid HTML now, simple string replacement is safer and cleaner.
+            # We skip the "strip after last link" logic to preserve HTML structure integrity.
 
         send_args = {
             'chat_id': TARGET_CHANNEL,
@@ -617,38 +557,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.info(f"Sending to {TARGET_CHANNEL}")
 
         if message.photo:
-            send_args['caption'] = formatted_text
+            send_args['caption'] = html_content
             await context.bot.send_photo(photo=message.photo[-1].file_id, **send_args)
         elif message.video:
-            send_args['caption'] = formatted_text
+            send_args['caption'] = html_content
             await context.bot.send_video(video=message.video.file_id, **send_args)
         elif message.document:
-            send_args['caption'] = formatted_text
+            send_args['caption'] = html_content
             await context.bot.send_document(document=message.document.file_id, **send_args)
         elif message.audio:
-            send_args['caption'] = formatted_text
+            send_args['caption'] = html_content
             await context.bot.send_audio(audio=message.audio.file_id, **send_args)
         else:
-            await context.bot.send_message(text=formatted_text, disable_notification=True, chat_id=TARGET_CHANNEL, parse_mode=ParseMode.HTML)
+            await context.bot.send_message(text=html_content, disable_notification=True, chat_id=TARGET_CHANNEL, parse_mode=ParseMode.HTML)
         logger.info("Sent successfully.")
 
     except Exception as e:
         logger.error(f"Error: {str(e)}")
+        # Send error to chat
         await context.bot.send_message(chat_id=update.effective_chat.id, text=f"⚠️ Error: {str(e)[:200]}")
-
-def extract_folder_id(url):
-    patterns = [r'/folders/([a-zA-Z0-9-_]+)', r'[?&]id=([a-zA-Z0-9-_]+)', r'/folderview[?&]id=([a-zA-Z0-9-_]+)', r'/mobile/folders/([a-zA-Z0-9-_]+)', r'/mobile/folders/[^/]+/([a-zA-Z0-9-_]+)', r'/drive/u/\d+/mobile/folders/([a-zA-Z0-9-_]+)']
-    for pattern in patterns:
-        match = re.search(pattern, url)
-        if match: return match.group(1)
-    return None
-
-def extract_file_id(url):
-    patterns = [r'/file/d/([a-zA-Z0-9-_]+)', r'/open\?id=([a-zA-Z0-9-_]+)', r'/uc\?id=([a-zA-Z0-9-_]+)', r'/mobile\?id=([a-zA-Z0-9-_]+)']
-    for pattern in patterns:
-        match = re.search(pattern, url)
-        if match: return match.group(1)
-    return None
 
 async def ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
