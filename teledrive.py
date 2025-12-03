@@ -85,7 +85,7 @@ async def auth_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     auth_url, _ = flow.authorization_url(prompt='consent')
     pending_authorizations[update.effective_user.id] = flow
     await update.message.reply_text(
-        f"[Authorize Google Drive]({auth_url})\n\nSend me the redirected URL.",
+        f"🔐 [Click here to Authorize Google Drive]({auth_url})\n\nSend me the redirected URL starting with localhost.",
         parse_mode='Markdown',
         disable_web_page_preview=True
     )
@@ -101,7 +101,7 @@ async def handle_auth_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
         code = text.split('?code=')[1].split('&')[0]
     
     if not code or user_id not in pending_authorizations:
-        await update.message.reply_text("❌ Invalid URL")
+        await update.message.reply_text("❌ Invalid Authorization URL or session expired.")
         return ConversationHandler.END
     
     try:
@@ -111,16 +111,16 @@ async def handle_auth_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with open(TOKEN_PATH, 'w') as token_file:
             token_file.write(creds.to_json())
         del pending_authorizations[user_id]
-        await update.message.reply_text("✅ Authorization successful!")
+        await update.message.reply_text("✅ **Authorization Successful!**\nThe bot is now linked to Google Drive.", parse_mode=ParseMode.MARKDOWN)
     except Exception as e:
-        await update.message.reply_text(f"❌ Failed: {str(e)}")
+        await update.message.reply_text(f"❌ **Authorization Failed:**\n`{str(e)}`", parse_mode=ParseMode.MARKDOWN)
     return ConversationHandler.END
 
 async def cancel_auth(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id in pending_authorizations:
         del pending_authorizations[user_id]
-    await update.message.reply_text("❌ Cancelled")
+    await update.message.reply_text("❌ Authorization process cancelled.")
     return ConversationHandler.END
 
 # ==========================================
@@ -310,14 +310,30 @@ def rename_files_and_folders(service, folder_id, rename_rules):
         except Exception: break
 
 def extract_folder_id(url):
-    patterns = [r'/folders/([a-zA-Z0-9-_]+)', r'[?&]id=([a-zA-Z0-9-_]+)', r'/folderview[?&]id=([a-zA-Z0-9-_]+)', r'/mobile/folders/([a-zA-Z0-9-_]+)', r'/mobile/folders/[^/]+/([a-zA-Z0-9-_]+)', r'/drive/u/\d+/mobile/folders/([a-zA-Z0-9-_]+)']
+    patterns = [
+        r'/folders/([a-zA-Z0-9-_]+)', 
+        r'[?&]id=([a-zA-Z0-9-_]+)', 
+        r'/folderview[?&]id=([a-zA-Z0-9-_]+)', 
+        r'/mobile/folders/([a-zA-Z0-9-_]+)', 
+        r'/mobile/folders/[^/]+/([a-zA-Z0-9-_]+)', 
+        r'/drive/u/\d+/mobile/folders/([a-zA-Z0-9-_]+)'
+    ]
     for pattern in patterns:
         match = re.search(pattern, url)
         if match: return match.group(1)
     return None
 
 def extract_file_id(url):
-    patterns = [r'/file/d/([a-zA-Z0-9-_]+)', r'/open\?id=([a-zA-Z0-9-_]+)', r'/uc\?id=([a-zA-Z0-9-_]+)', r'/mobile\?id=([a-zA-Z0-9-_]+)']
+    # Added patterns for /document/, /spreadsheets/, /presentation/
+    patterns = [
+        r'/file/d/([a-zA-Z0-9-_]+)', 
+        r'/document/d/([a-zA-Z0-9-_]+)', 
+        r'/spreadsheets/d/([a-zA-Z0-9-_]+)', 
+        r'/presentation/d/([a-zA-Z0-9-_]+)', 
+        r'/open\?id=([a-zA-Z0-9-_]+)', 
+        r'/uc\?id=([a-zA-Z0-9-_]+)', 
+        r'/mobile\?id=([a-zA-Z0-9-_]+)'
+    ]
     for pattern in patterns:
         match = re.search(pattern, url)
         if match: return match.group(1)
@@ -602,8 +618,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         banned_data = initialize_banned_items(drive_service)
 
         if original_text:
+            # UPDATED REGEX to include docs.google.com
             url_matches = list(re.finditer(
-                r'https?://(?:drive\.google\.com/(?:drive/folders/|folderview\?id=|file/d/|open\?id=|uc\?id=|mobile/folders/|mobile\?id=|.*[?&]id=|drive/u/\d+/mobile/folders/)|.*\.google\.com/open\?id=)[\w-]+[^\s>]*',
+                r'https?://(?:docs\.google\.com/(?:document|spreadsheets|presentation)/d/|drive\.google\.com/(?:drive/folders/|folderview\?id=|file/d/|open\?id=|uc\?id=|mobile/folders/|mobile\?id=|.*[?&]id=|drive/u/\d+/mobile/folders/)|.*\.google\.com/open\?id=)[\w-]+[^\s>]*',
                 original_text
             ))
             
@@ -641,9 +658,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     final_text = original_text[:start_index] + new_url
                     
                     # 4. Filter entities.
-                    # Since we didn't change the length of the text BEFORE the link,
-                    # the offsets of all entities in that region are perfectly preserved.
-                    # We just drop any entity that starts after the cut-off.
                     final_entities = [e for e in original_entities if e.offset + e.length <= start_index]
                     
                     processed_any_link = True
@@ -682,13 +696,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=update.effective_chat.id, text=f"⚠️ Error: {str(e)[:200]}")
 
 # ==========================================
-# COMMAND HANDLERS
+# COMMAND HANDLERS (DETAILED)
 # ==========================================
 
 async def ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         if not context.args:
-            await update.message.reply_text("❌ Usage: /ban <link>")
+            await update.message.reply_text("❌ **Usage:** `/ban <link>` or `/ban <name>`", parse_mode=ParseMode.MARKDOWN)
             return
         input_text = ' '.join(context.args).strip()
         drive_service = get_drive_service()
@@ -699,28 +713,50 @@ async def ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if file_id or folder_id:
             item_id = file_id or folder_id
-            item_info = execute_with_retry(drive_service.files().get, fileId=item_id, fields='name,size,mimeType')
-            size_type_str = f"{item_info.get('size', '0')}:{item_info.get('mimeType', 'unknown')}"
-            
-            if size_type_str not in banned_data['size_types']:
-                banned_data['size_types'].append(size_type_str)
-                save_banned_items(drive_service, banned_data)
-                await update.message.reply_text(f"✅ Banned type: {size_type_str}")
-            else:
-                await update.message.reply_text("⚠️ Already banned.")
+            try:
+                item_info = execute_with_retry(drive_service.files().get, fileId=item_id, fields='name,size,mimeType')
+                size_type_str = f"{item_info.get('size', '0')}:{item_info.get('mimeType', 'unknown')}"
+                
+                if size_type_str not in banned_data['size_types']:
+                    banned_data['size_types'].append(size_type_str)
+                    save_banned_items(drive_service, banned_data)
+                    
+                    # Detailed Response
+                    size_mb = int(item_info.get('size', 0)) / (1024 * 1024)
+                    resp = (
+                        f"🚫 **ITEM BANNED SUCCESSFULLY**\n\n"
+                        f"📁 **Name:** `{item_info.get('name')}`\n"
+                        f"💾 **Size:** `{size_mb:.2f} MB`\n"
+                        f"📄 **Type:** `{item_info.get('mimeType')}`\n"
+                        f"🆔 **ID:** `{item_id}`\n\n"
+                        f"🔒 **Ban Rule Added:** `{size_type_str}`"
+                    )
+                    await update.message.reply_text(resp, parse_mode=ParseMode.MARKDOWN)
+                else:
+                    await update.message.reply_text("⚠️ **Already Banned.**\nThis file size/type combination is already in the blacklist.", parse_mode=ParseMode.MARKDOWN)
+            except Exception as e:
+                await update.message.reply_text(f"❌ **Error fetching file:**\n`{str(e)}`", parse_mode=ParseMode.MARKDOWN)
         else:
+            # Fallback to Name Ban
             if input_text not in banned_data['names']:
                 banned_data['names'].append(input_text)
                 save_banned_items(drive_service, banned_data)
-                await update.message.reply_text(f"✅ Banned name: {input_text}")
+                resp = (
+                    f"🚫 **NAME BANNED SUCCESSFULLY**\n\n"
+                    f"📝 **Keyword:** `{input_text}`\n"
+                    f"⚠️ Any file containing this exact name will now be skipped."
+                )
+                await update.message.reply_text(resp, parse_mode=ParseMode.MARKDOWN)
             else:
-                await update.message.reply_text("⚠️ Already banned.")
+                await update.message.reply_text("⚠️ **Already Banned.**\nThis name is already in the blacklist.", parse_mode=ParseMode.MARKDOWN)
     except Exception as e:
-        await update.message.reply_text(f"⚠️ Error: {str(e)}")
+        await update.message.reply_text(f"⚠️ **Error:** `{str(e)}`", parse_mode=ParseMode.MARKDOWN)
 
 async def unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        if not context.args: return
+        if not context.args:
+            await update.message.reply_text("❌ **Usage:** `/unban <link>` or `/unban <name>`", parse_mode=ParseMode.MARKDOWN)
+            return
         input_text = ' '.join(context.args).strip()
         drive_service = get_drive_service()
         banned_data = initialize_banned_items(drive_service)
@@ -730,37 +766,78 @@ async def unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if file_id or folder_id:
             item_id = file_id or folder_id
-            item_info = execute_with_retry(drive_service.files().get, fileId=item_id, fields='name,size,mimeType')
-            size_type_str = f"{item_info.get('size', '0')}:{item_info.get('mimeType', 'unknown')}"
-            if size_type_str in banned_data['size_types']:
-                banned_data['size_types'].remove(size_type_str)
-                save_banned_items(drive_service, banned_data)
-                await update.message.reply_text("✅ Unbanned.")
+            try:
+                item_info = execute_with_retry(drive_service.files().get, fileId=item_id, fields='name,size,mimeType')
+                size_type_str = f"{item_info.get('size', '0')}:{item_info.get('mimeType', 'unknown')}"
+                
+                if size_type_str in banned_data['size_types']:
+                    banned_data['size_types'].remove(size_type_str)
+                    save_banned_items(drive_service, banned_data)
+                    resp = (
+                        f"✅ **ITEM UNBANNED**\n\n"
+                        f"📄 **Type:** `{item_info.get('mimeType')}`\n"
+                        f"💾 **Size:** `{item_info.get('size', '0')} bytes`\n"
+                        f"🔓 **Rule Removed:** `{size_type_str}`"
+                    )
+                    await update.message.reply_text(resp, parse_mode=ParseMode.MARKDOWN)
+                else:
+                    await update.message.reply_text("⚠️ **Not Banned.**\nThis specific file type/size rule was not found.", parse_mode=ParseMode.MARKDOWN)
+            except Exception as e:
+                await update.message.reply_text(f"❌ **Error fetching file:**\n`{str(e)}`", parse_mode=ParseMode.MARKDOWN)
         else:
             if input_text in banned_data['names']:
                 banned_data['names'].remove(input_text)
                 save_banned_items(drive_service, banned_data)
-                await update.message.reply_text("✅ Unbanned.")
+                await update.message.reply_text(f"✅ **NAME UNBANNED**\n\n📝 **Keyword:** `{input_text}`", parse_mode=ParseMode.MARKDOWN)
+            else:
+                await update.message.reply_text("⚠️ **Not Found.**\nThis name is not in the blacklist.", parse_mode=ParseMode.MARKDOWN)
     except Exception as e:
-        await update.message.reply_text(f"⚠️ Error: {str(e)}")
+        await update.message.reply_text(f"⚠️ **Error:** `{str(e)}`", parse_mode=ParseMode.MARKDOWN)
 
 async def change(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        if not context.args: return
-        args = ' '.join(context.args).split(' to ', 1)
-        if len(args) != 2: return
+        if not context.args:
+            await update.message.reply_text("❌ **Usage:** `/change <Old Text> to <New Text>`", parse_mode=ParseMode.MARKDOWN)
+            return
+        
+        full_arg = ' '.join(context.args)
+        if ' to ' not in full_arg:
+             await update.message.reply_text("❌ **Format Error:** Separator ' to ' missing.\nUse: `/change OldName to NewName`", parse_mode=ParseMode.MARKDOWN)
+             return
+
+        args = full_arg.split(' to ', 1)
+        old_text = args[0].strip()
+        new_text = args[1].strip()
+        
         drive_service = get_drive_service()
         banned_data = initialize_banned_items(drive_service)
-        rename_rule = f"{args[0].strip()}|{args[1].strip()}"
+        rename_rule = f"{old_text}|{new_text}"
+        
         if rename_rule not in banned_data['rename_rules']:
             banned_data['rename_rules'].append(rename_rule)
             save_banned_items(drive_service, banned_data)
-            await update.message.reply_text(f"✅ Added rule.")
+            resp = (
+                f"✅ **RENAME RULE ADDED**\n\n"
+                f"🔴 **From:** `{old_text}`\n"
+                f"🟢 **To:** `{new_text}`"
+            )
+            await update.message.reply_text(resp, parse_mode=ParseMode.MARKDOWN)
+        else:
+            await update.message.reply_text("⚠️ **Rule Exists.**\nThis rename rule is already active.", parse_mode=ParseMode.MARKDOWN)
     except Exception as e:
-        await update.message.reply_text(f"⚠️ Error: {str(e)}")
+        await update.message.reply_text(f"⚠️ **Error:** `{str(e)}`", parse_mode=ParseMode.MARKDOWN)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🚀 Bot Ready.\n/auth\n/ban\n/unban\n/change")
+    await update.message.reply_text(
+        "🚀 **Drive Bot is Ready!**\n\n"
+        "🛠 **Commands:**\n"
+        "• `/auth` - Link Google Drive\n"
+        "• `/ban <link>` - Ban specific file types/sizes\n"
+        "• `/ban <name>` - Ban specific keywords\n"
+        "• `/unban` - Remove ban\n"
+        "• `/change` - Add rename rules",
+        parse_mode=ParseMode.MARKDOWN
+    )
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"Exception: {context.error}")
@@ -845,5 +922,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-
