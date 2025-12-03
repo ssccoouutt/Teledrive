@@ -20,13 +20,14 @@ from google.auth.transport.requests import Request
 from googleapiclient.errors import HttpError
 from google_auth_oauthlib.flow import InstalledAppFlow
 
-# Configuration
+# ==========================================
+# CONFIGURATION
+# ==========================================
 BOT_TOKEN = "7846379611:AAFk9kkoQwsA6fCS4vF4Ltr6xn1W645nHFM"
 TOKEN_PATH = 'token.json'
 CREDENTIALS_PATH = 'credentials.json'
 PHASE2_SOURCE = '1ixJU6s6bKbzIdsbjKDKrZYLt1nl_TSul'
 PHASE3_SOURCE = '1iM6ghIcYsx1gIvfdjm-HjCRW3MWy0JCP'
-# Short links removed as requested
 TARGET_CHANNEL = "@techworld196"
 BANNED_FILE_ID = '1r2BpwG9isOkKjL5tYj3WqqiF5w4oWpCY'
 SCOPES = ['https://www.googleapis.com/auth/drive']
@@ -39,12 +40,10 @@ HEALTH_CHECK_ENDPOINT = "/health"
 # Constants
 MAX_RETRIES = 5
 CHUNK_SIZE = 20
-
-# Authorization state
 AUTH_STATE = 1
-pending_authorizations = {}
 
-# Global variables for web server
+# Global variables
+pending_authorizations = {}
 runner = None
 site = None
 
@@ -58,6 +57,10 @@ logging.getLogger('aiohttp.access').setLevel(logging.WARNING)
 logging.getLogger('googleapiclient.discovery_cache').setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
+
+# ==========================================
+# GOOGLE DRIVE & AUTH FUNCTIONS
+# ==========================================
 
 def get_drive_service():
     """Initialize and return Google Drive service"""
@@ -74,33 +77,6 @@ def get_drive_service():
             raise Exception('Google Drive authorization required. Use /auth to authenticate.')
     
     return build('drive', 'v3', credentials=creds)
-
-async def health_check(request):
-    return web.Response(text=f"Bot is operational", status=200)
-
-async def root_handler(request):
-    return web.Response(text="Bot is running", status=200)
-
-async def self_ping():
-    while True:
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(f'http://localhost:{WEB_PORT}{HEALTH_CHECK_ENDPOINT}') as resp:
-                    pass 
-        except Exception:
-            pass
-        await asyncio.sleep(PING_INTERVAL)
-
-async def run_webserver():
-    app = web.Application()
-    app.router.add_get(HEALTH_CHECK_ENDPOINT, health_check)
-    app.router.add_get("/", root_handler)
-    global runner, site
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', WEB_PORT)
-    await site.start()
-    logger.info(f"Health check server running on port {WEB_PORT}")
 
 async def auth_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     flow = InstalledAppFlow.from_client_secrets_file(
@@ -146,6 +122,10 @@ async def cancel_auth(update: Update, context: ContextTypes.DEFAULT_TYPE):
         del pending_authorizations[user_id]
     await update.message.reply_text("❌ Cancelled")
     return ConversationHandler.END
+
+# ==========================================
+# DRIVE OPERATIONS
+# ==========================================
 
 def initialize_banned_items(service):
     try:
@@ -201,12 +181,8 @@ def execute_with_retry(func, *args, **kwargs):
             return func(*args, **kwargs).execute()
         except HttpError as e:
             wait_time = 5 * (2 ** attempt) 
-            if e.resp.status in [403, 429]:
-                logger.warning(f"⚠️ RATE LIMIT in {func_name}. Waiting {wait_time}s...")
-                time.sleep(wait_time)
-                continue
-            if e.resp.status in [500, 502, 503, 504]:
-                logger.warning(f"⚠️ Server Error {e.resp.status} in {func_name}. Waiting {wait_time}s...")
+            if e.resp.status in [403, 429, 500, 502, 503, 504]:
+                logger.warning(f"⚠️ API Error {e.resp.status} in {func_name}. Waiting {wait_time}s...")
                 time.sleep(wait_time)
                 continue
             logger.error(f"API Error in {func_name}: {e}")
@@ -217,56 +193,39 @@ def execute_with_retry(func, *args, **kwargs):
                 logger.warning(f"⚠️ Network error in {func_name}. Retrying in {wait_time}s...")
                 time.sleep(wait_time)
                 continue
-            logger.error(f"Critical error in {func_name}: {e}")
-            raise
-    raise Exception(f"Operation {func_name} failed after {MAX_RETRIES} attempts.")
+            raise Exception(f"Operation {func_name} failed after {MAX_RETRIES} attempts.")
+    raise Exception(f"Operation {func_name} failed.")
 
 def copy_file(service, file_id, banned_data):
-    try:
-        logger.info(f"STEP: Processing single file {file_id}")
-        file = execute_with_retry(service.files().get, fileId=file_id, fields='name,mimeType,size')
-        new_name = apply_rename_rules(file['name'], banned_data['rename_rules'])
-        if should_skip_item(new_name, file['mimeType'], file.get('size', 0), banned_data):
-            raise Exception(f"File {new_name} is banned")
-        copied_file = service.files().copy(fileId=file_id).execute()
-        logger.info(f"File copied: {new_name}")
-        return copied_file['id']
-    except Exception as e:
-        logger.error(f"FAILED to copy file {file_id}: {str(e)}")
-        raise
+    logger.info(f"STEP: Processing single file {file_id}")
+    file = execute_with_retry(service.files().get, fileId=file_id, fields='name,mimeType,size')
+    new_name = apply_rename_rules(file['name'], banned_data['rename_rules'])
+    if should_skip_item(new_name, file['mimeType'], file.get('size', 0), banned_data):
+        raise Exception(f"File {new_name} is banned")
+    copied_file = service.files().copy(fileId=file_id).execute()
+    return copied_file['id']
 
 def copy_folder(service, folder_id, banned_data):
-    try:
-        logger.info(f"STEP: Starting folder copy: {folder_id}")
-        folder = execute_with_retry(service.files().get, fileId=folder_id, fields='name')
-        new_folder_name = apply_rename_rules(folder['name'], banned_data['rename_rules'])
-        logger.info(f"Creating root folder: {new_folder_name}")
-        new_folder = service.files().create(body={'name': new_folder_name, 'mimeType': 'application/vnd.google-apps.folder'}).execute()
-        new_folder_id = new_folder['id']
+    logger.info(f"STEP: Starting folder copy: {folder_id}")
+    folder = execute_with_retry(service.files().get, fileId=folder_id, fields='name')
+    new_folder_name = apply_rename_rules(folder['name'], banned_data['rename_rules'])
+    new_folder = service.files().create(body={'name': new_folder_name, 'mimeType': 'application/vnd.google-apps.folder'}).execute()
+    new_folder_id = new_folder['id']
 
-        copy_folder_contents(service, folder_id, new_folder_id, banned_data)
-        subfolders = get_all_subfolders_recursive(service, new_folder_id)
-        
-        logger.info(f"Phase 2: Adding watermark files to {len(subfolders)} subfolders...")
-        for i, subfolder_id in enumerate(subfolders):
-            copy_files_only(service, PHASE2_SOURCE, subfolder_id, banned_data, overwrite=True)
-            if i % 10 == 0: time.sleep(1)
+    copy_folder_contents(service, folder_id, new_folder_id, banned_data)
+    subfolders = get_all_subfolders_recursive(service, new_folder_id)
+    
+    for i, subfolder_id in enumerate(subfolders):
+        copy_files_only(service, PHASE2_SOURCE, subfolder_id, banned_data, overwrite=True)
+        if i % 10 == 0: time.sleep(1)
 
-        logger.info("Phase 3: Adding bonus content...")
-        copy_bonus_content(service, PHASE3_SOURCE, new_folder_id, banned_data, overwrite=True)
-        
-        logger.info("Phase 4: Renaming items...")
-        rename_files_and_folders(service, new_folder_id, banned_data['rename_rules'])
-        for i, subfolder_id in enumerate(subfolders):
-            rename_files_and_folders(service, subfolder_id, banned_data['rename_rules'])
-            if i % 10 == 0: time.sleep(1)
-
-        logger.info("COMPLETED successfully.")
-        return new_folder_id
-    except Exception as e:
-        logger.error(f"CRITICAL FAILURE in copy_folder: {str(e)}")
-        logger.error(traceback.format_exc())
-        raise
+    copy_bonus_content(service, PHASE3_SOURCE, new_folder_id, banned_data, overwrite=True)
+    
+    rename_files_and_folders(service, new_folder_id, banned_data['rename_rules'])
+    for i, subfolder_id in enumerate(subfolders):
+        rename_files_and_folders(service, subfolder_id, banned_data['rename_rules'])
+        if i % 10 == 0: time.sleep(1)
+    return new_folder_id
 
 def get_all_subfolders_recursive(service, folder_id):
     subfolders = []
@@ -282,24 +241,11 @@ def get_all_subfolders_recursive(service, folder_id):
                     queue.append(folder['id'])
                 page_token = response.get('nextPageToken')
                 if not page_token: break
-            except Exception as e:
-                logger.error(f"Error getting subfolders: {str(e)}")
-                break
+            except Exception: break
     return subfolders
 
 def copy_files_only(service, source_id, dest_id, banned_data, overwrite=False):
-    page_token = None
-    while True:
-        try:
-            response = execute_with_retry(service.files().list, q=f"'{source_id}' in parents", fields='nextPageToken, files(id, name, mimeType, size)', pageSize=CHUNK_SIZE, pageToken=page_token)
-            for item in response.get('files', []):
-                new_name = apply_rename_rules(item['name'], banned_data['rename_rules'])
-                if should_skip_item(new_name, item['mimeType'], item.get('size', 0), banned_data): continue
-                if item['mimeType'] != 'application/vnd.google-apps.folder':
-                    copy_item_to_folder(service, item, dest_id, banned_data, overwrite)
-            page_token = response.get('nextPageToken')
-            if not page_token: break
-        except Exception: break
+    copy_bonus_content(service, source_id, dest_id, banned_data, overwrite)
 
 def copy_bonus_content(service, source_id, dest_id, banned_data, overwrite=False):
     page_token = None
@@ -332,21 +278,17 @@ def copy_folder_contents(service, source_id, dest_id, banned_data):
     while True:
         try:
             response = execute_with_retry(service.files().list, q=f"'{source_id}' in parents", fields='nextPageToken, files(id, name, mimeType, size)', pageSize=CHUNK_SIZE, pageToken=page_token)
-            files_list = response.get('files', [])
-            for item in files_list:
+            for item in response.get('files', []):
                 new_name = apply_rename_rules(item['name'], banned_data['rename_rules'])
                 if should_skip_item(new_name, item['mimeType'], item.get('size', 0), banned_data): continue
                 if item['mimeType'] == 'application/vnd.google-apps.folder':
-                    logger.info(f"Subfolder: {new_name}")
                     new_subfolder = service.files().create(body={'name': new_name, 'parents': [dest_id], 'mimeType': 'application/vnd.google-apps.folder'}).execute()
                     copy_folder_contents(service, item['id'], new_subfolder['id'], banned_data)
                 else:
                     service.files().copy(fileId=item['id'], body={'parents': [dest_id]}).execute()
             page_token = response.get('nextPageToken')
             if not page_token: break
-        except Exception as e:
-            logger.error(f"Error in folder contents {source_id}: {str(e)}")
-            break
+        except Exception: break
 
 def rename_files_and_folders(service, folder_id, rename_rules):
     page_token = None
@@ -381,33 +323,131 @@ def extract_file_id(url):
         if match: return match.group(1)
     return None
 
+# ==========================================
+# STRICTLY IMPORTED FORMATTING LOGIC
+# ==========================================
+
 def adjust_entity_offsets(text, entities):
-    if not entities: return []
+    """Convert UTF-16 entity offsets to character offsets"""
+    if not entities:
+        return []
+    
     utf16_to_char = {}
     char_pos = 0
     utf16_pos = 0
+    
     for char in text:
         utf16_to_char[utf16_pos] = char_pos
         utf16_pos += len(char.encode('utf-16-le')) // 2
         char_pos += 1
+    
     adjusted_entities = []
     for entity in entities:
         start = utf16_to_char.get(entity.offset, entity.offset)
         end = utf16_to_char.get(entity.offset + entity.length, entity.offset + entity.length)
-        new_entity = MessageEntity(type=entity.type, offset=start, length=end - start, url=entity.url, user=entity.user, language=entity.language, custom_emoji_id=entity.custom_emoji_id)
+        
+        new_entity = MessageEntity(
+            type=entity.type,
+            offset=start,
+            length=end - start,
+            url=entity.url,
+            user=entity.user,
+            language=entity.language,
+            custom_emoji_id=entity.custom_emoji_id
+        )
         adjusted_entities.append(new_entity)
+    
     return adjusted_entities
 
 def filter_entities(entities):
-    allowed_types = {MessageEntity.BOLD, MessageEntity.ITALIC, MessageEntity.CODE, MessageEntity.PRE, MessageEntity.UNDERLINE, MessageEntity.STRIKETHROUGH, MessageEntity.TEXT_LINK, MessageEntity.SPOILER, "blockquote"}
-    return [e for e in entities if getattr(e, 'type', None) in allowed_types] if entities else []
+    """Filter only allowed entity types"""
+    allowed_types = {
+        MessageEntity.BOLD,
+        MessageEntity.ITALIC,
+        MessageEntity.CODE,
+        MessageEntity.PRE,
+        MessageEntity.UNDERLINE,
+        MessageEntity.STRIKETHROUGH,
+        MessageEntity.TEXT_LINK,
+        MessageEntity.SPOILER,
+        "blockquote"
+    }
+    
+    if not entities:
+        return []
+    
+    return [e for e in entities if getattr(e, 'type', None) in allowed_types]
+
+def apply_formatting_simple(text, entities, skip_types=None):
+    """Simple formatting without special blockquote handling"""
+    if not entities:
+        return text
+    
+    if skip_types is None:
+        skip_types = set()
+    
+    # Escape HTML first
+    formatted_text = text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+    
+    # Apply entities in reverse order
+    sorted_entities = sorted(entities, key=lambda e: -e.offset)
+    
+    entity_tags = {
+        MessageEntity.BOLD: ('<b>', '</b>'),
+        MessageEntity.ITALIC: ('<i>', '</i>'),
+        MessageEntity.UNDERLINE: ('<u>', '</u>'),
+        MessageEntity.STRIKETHROUGH: ('<s>', '</s>'),
+        MessageEntity.SPOILER: ('<tg-spoiler>', '</tg-spoiler>'),
+        MessageEntity.CODE: ('<code>', '</code>'),
+        MessageEntity.PRE: ('<pre>', '</pre>'),
+        MessageEntity.TEXT_LINK: (lambda e: f'<a href="{e.url}">', '</a>'),
+    }
+    
+    for entity in sorted_entities:
+        entity_type = getattr(entity, 'type', None)
+        if entity_type not in entity_tags or entity_type in skip_types:
+            continue
+        
+        start_tag, end_tag = entity_tags[entity_type]
+        if callable(start_tag):
+            start_tag = start_tag(entity)
+        
+        start = entity.offset
+        end = start + entity.length
+        
+        # Insert tags
+        formatted_text = formatted_text[:start] + start_tag + formatted_text[start:end] + end_tag + formatted_text[end:]
+    
+    # Restore HTML tags
+    html_tags = ['b', 'i', 'u', 's', 'code', 'pre', 'a', 'tg-spoiler']
+    for tag in html_tags:
+        formatted_text = formatted_text.replace(f'&lt;{tag}&gt;', f'<{tag}>').replace(f'&lt;/{tag}&gt;', f'</{tag}>')
+    
+    return formatted_text
 
 def apply_formatting(text, entities):
-    """Restored Original Logic with blockquote entity support and removed manual '>'-based blockquote handling"""
-    if not text: return text
-    chars = list(text)
-    text_length = len(chars)
-    sorted_entities = sorted(entities or [], key=lambda e: -e.offset)
+    """Apply formatting to text based on entities - FIXED VERSION"""
+    if not text:
+        return text
+    
+    # Make a copy of entities
+    if entities:
+        entities = [MessageEntity(
+            type=e.type,
+            offset=e.offset,
+            length=e.length,
+            url=e.url,
+            user=e.user,
+            language=e.language,
+            custom_emoji_id=e.custom_emoji_id
+        ) for e in entities]
+    
+    # Sort entities by offset (ascending) and length (descending)
+    sorted_entities = sorted(entities or [], key=lambda e: (e.offset, -e.length))
+    
+    segments = []
+    last_end = 0
+    
     entity_tags = {
         MessageEntity.BOLD: ('<b>', '</b>'),
         MessageEntity.ITALIC: ('<i>', '</i>'),
@@ -419,110 +459,125 @@ def apply_formatting(text, entities):
         MessageEntity.TEXT_LINK: (lambda e: f'<a href="{e.url}">', '</a>'),
         "blockquote": ('<blockquote>', '</blockquote>')
     }
-    for entity in sorted_entities:
+    
+    i = 0
+    while i < len(sorted_entities):
+        entity = sorted_entities[i]
         entity_type = getattr(entity, 'type', None)
-        if entity_type not in entity_tags: continue
+        
+        if entity_type not in entity_tags:
+            i += 1
+            continue
+        
+        if entity.offset > last_end:
+            segments.append(text[last_end:entity.offset])
+        
+        entity_end = entity.offset + entity.length
+        
+        # Find nested entities
+        nested_entities = []
+        j = i + 1
+        while j < len(sorted_entities):
+            next_entity = sorted_entities[j]
+            if (next_entity.offset >= entity.offset and 
+                next_entity.offset + next_entity.length <= entity_end):
+                adjusted_entity = MessageEntity(
+                    type=next_entity.type,
+                    offset=next_entity.offset - entity.offset,
+                    length=next_entity.length,
+                    url=next_entity.url,
+                    user=next_entity.user,
+                    language=next_entity.language,
+                    custom_emoji_id=next_entity.custom_emoji_id
+                )
+                nested_entities.append(adjusted_entity)
+                j += 1
+            else:
+                break
+        
+        entity_content = text[entity.offset:entity_end]
+        
+        # Apply formatting to nested content
+        if nested_entities:
+            # THIS IS THE CRITICAL LOGIC FROM SCRIPT 2
+            formatted_content = apply_formatting_simple(entity_content, nested_entities)
+        else:
+            formatted_content = entity_content
+        
         start_tag, end_tag = entity_tags[entity_type]
-        if callable(start_tag): start_tag = start_tag(entity)
-        start = entity.offset
-        end = start + entity.length
-        if start >= text_length or end > text_length: continue
-        before = ''.join(chars[:start])
-        content = ''.join(chars[start:end])
-        after = ''.join(chars[end:])
-        # Keep inner formatting intact (do not strip tags inside blockquote)
-        chars = list(before + start_tag + content + end_tag + after)
-        text_length = len(chars)
+        if callable(start_tag):
+            start_tag = start_tag(entity)
+        
+        segments.append(start_tag)
+        segments.append(formatted_content)
+        segments.append(end_tag)
+        
+        i += 1 + len(nested_entities)
+        last_end = entity_end
     
-    # NOTE: removed line-based '>' blockquote processing because Telegram blockquote entities
-    # are already handled above. Keeping manual '>' handling caused truncation issues.
+    if last_end < len(text):
+        segments.append(text[last_end:])
     
-    # Escape everything, then unescape allowed tags
-    formatted_text = ''.join(chars)
+    formatted_text = ''.join(segments)
+    
+    # Handle manual blockquote detection
+    if ">" in formatted_text:
+        formatted_text = formatted_text.replace("&gt;", ">")
+        lines = formatted_text.split('\n')
+        formatted_lines = []
+        in_blockquote = False
+        
+        for line in lines:
+            stripped_line = line.lstrip()
+            if stripped_line.startswith('>'):
+                if not in_blockquote:
+                    formatted_lines.append('<blockquote>')
+                    in_blockquote = True
+                content_line = stripped_line[1:].lstrip()
+                formatted_lines.append(content_line)
+            else:
+                if in_blockquote:
+                    formatted_lines.append('</blockquote>')
+                    in_blockquote = False
+                formatted_lines.append(line)
+        
+        if in_blockquote:
+            formatted_lines.append('</blockquote>')
+        
+        formatted_text = '\n'.join(formatted_lines)
+    
     formatted_text = formatted_text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+    
     html_tags = ['b', 'i', 'u', 's', 'code', 'pre', 'a', 'tg-spoiler', 'blockquote']
     for tag in html_tags:
         formatted_text = formatted_text.replace(f'&lt;{tag}&gt;', f'<{tag}>').replace(f'&lt;/{tag}&gt;', f'</{tag}>')
+    
     return formatted_text
 
 def close_dangling_tags(html_text):
-    """
-    Scans HTML and closes any tags that were left open (e.g. by truncation or blockquote logic).
-    Also ignores unmatched closing tags to avoid 'unmatched end tag' errors.
-    This implementation builds the output progressively and avoids leaving unmatched closers.
-    """
-    # We'll parse through html_text and reconstruct a balanced version
-    tag_regex = re.compile(r'(<!--.*?-->|</?[a-zA-Z][a-zA-Z0-9\-]*(?:\s[^>]*)?>)', re.DOTALL)
-    pos = 0
-    out_parts = []
-    stack = []  # stack of open tag names
-
-    for m in tag_regex.finditer(html_text):
-        start, end = m.span()
-        # append text before the tag
-        before = html_text[pos:start]
-        if before:
-            out_parts.append(before)
-        tag_full = m.group(1)
-        pos = end
-
-        # Ignore HTML comments as-is
-        if tag_full.startswith('<!--'):
-            out_parts.append(tag_full)
-            continue
-
-        # Determine if self-closing
-        if tag_full.endswith('/>'):
-            out_parts.append(tag_full)
-            continue
-
-        # Is it a closing tag?
-        closing_match = re.match(r'</\s*([a-zA-Z0-9\-]+)\s*>', tag_full)
-        if closing_match:
-            tag_name = closing_match.group(1)
-            if stack and stack[-1] == tag_name:
-                # Normal closing for last opened
-                stack.pop()
-                out_parts.append(tag_full)
+    """Close any unclosed HTML tags"""
+    tags_stack = []
+    matches = list(re.finditer(r'</?([a-z-]+)[^>]*>', html_text))
+    
+    for m in matches:
+        tag_full = m.group(0)
+        tag_name = m.group(1)
+        
+        if tag_full.startswith('</'):
+            if tags_stack and tags_stack[-1] == tag_name:
+                tags_stack.pop()
             else:
-                # Unmatched closer: try to find it in the stack
-                if tag_name in stack:
-                    # Close intermediate tags first (insert explicit closers), then close this tag
-                    temp = []
-                    while stack and stack[-1] != tag_name:
-                        t = stack.pop()
-                        temp.append(t)
-                        out_parts.append(f'</{t}>')
-                    if stack and stack[-1] == tag_name:
-                        stack.pop()
-                        out_parts.append(tag_full)
-                    # any temp were already closed
-                else:
-                    # Completely unmatched closing tag -> skip it to avoid breaking structure
-                    # (do not append it)
-                    continue
-        else:
-            # Opening tag: capture the name and push to stack and append
-            open_match = re.match(r'<\s*([a-zA-Z0-9\-]+)(?:\s[^>]*)?>', tag_full)
-            if open_match:
-                tag_name = open_match.group(1)
-                stack.append(tag_name)
-                out_parts.append(tag_full)
-            else:
-                # malformed tag; append as-is
-                out_parts.append(tag_full)
+                html_text = html_text[:m.start()] + html_text[m.end():]
+                matches = list(re.finditer(r'</?([a-z-]+)[^>]*>', html_text))
+        elif not tag_full.endswith('/>'):
+            tags_stack.append(tag_name)
+    
+    closing_tags = ''.join([f'</{tag}>' for tag in reversed(tags_stack)])
+    return html_text + closing_tags
 
-    # append any trailing text after last tag
-    tail = html_text[pos:]
-    if tail:
-        out_parts.append(tail)
-
-    # Close any still-open tags in reverse order
-    while stack:
-        t = stack.pop()
-        out_parts.append(f'</{t}>')
-
-    return ''.join(out_parts)
+# ==========================================
+# MAIN BOT LOGIC
+# ==========================================
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
@@ -530,15 +585,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     logger.info("New message received.")
     
-    # 1. Start with original text and entities
+    # 1. Get original text and adjust entity offsets immediately using correct function
     original_text = message.caption or message.text or ''
-    # Convert utf-16 offsets to char offsets immediately
-    original_entities = adjust_entity_offsets(original_text, filter_entities(message.caption_entities if message.caption else message.entities))
+    original_entities = adjust_entity_offsets(
+        original_text, 
+        filter_entities(message.caption_entities if message.caption else message.entities)
+    )
     
+    # Default to returning original if no links found
     final_text = original_text
     final_entities = original_entities
-    
-    drive_links = []
+    processed_any_link = False
 
     try:
         drive_service = get_drive_service()
@@ -552,106 +609,48 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             logger.info(f"Found {len(url_matches)} Drive links.")
             
-            # We process matches in reverse order so replacements don't mess up earlier indices
-            # But here we just build a list of replacements
-            replacements = []
-
-            for match in url_matches:
+            # Since user says the link is the "last thing", we iterate in reverse
+            # and stop as soon as we successfully process one link.
+            for match in reversed(url_matches):
                 url = match.group()
-                logger.info(f"Processing: {url}")
+                logger.info(f"Processing candidate: {url}")
                 folder_id = extract_folder_id(url)
                 file_id = extract_file_id(url)
                 
                 new_url = None
                 
-                if folder_id:
-                    try:
+                try:
+                    if folder_id:
                         logger.info(f"Found FOLDER {folder_id}. Starting task...")
                         new_id = await asyncio.get_event_loop().run_in_executor(None, copy_folder, drive_service, folder_id, banned_data)
                         new_url = f'https://drive.google.com/drive/folders/{new_id}'
-                    except Exception as e:
-                        logger.error(f"Error folder {url}: {str(e)}")
-                        await message.reply_text(f"⚠️ Error: {str(e)}")
-                        continue
-                elif file_id:
-                    try:
+                    elif file_id:
                         logger.info(f"Found FILE {file_id}. Starting task...")
                         new_id = await asyncio.get_event_loop().run_in_executor(None, copy_file, drive_service, file_id, banned_data)
                         new_url = f'https://drive.google.com/file/d/{new_id}/view?usp=sharing'
-                    except Exception as e:
-                        logger.error(f"Error file {url}: {str(e)}")
-                        await message.reply_text(f"⚠️ Error: {str(e)}")
-                        continue
+                except Exception as e:
+                    logger.error(f"Error processing {url}: {str(e)}")
+                    continue # Try next link if this one fails
 
                 if new_url:
-                    replacements.append((match.start(), match.end(), new_url))
-            
-            # Apply replacements and update entities manually
-            # We sort replacements by start index to process sequentially
-            replacements.sort(key=lambda x: x[0])
-            
-            offset_shift = 0
-            
-            # Create a new list for modified entities
-            current_entities = []
-            # We clone existing entities to safe objects
-            for e in final_entities:
-                current_entities.append(MessageEntity(e.type, e.offset, e.length, url=e.url, user=e.user, language=e.language, custom_emoji_id=e.custom_emoji_id))
-            
-            # Reconstruct text
-            new_text_builder = ""
-            last_idx = 0
-            
-            for start, end, new_str in replacements:
-                # Add chunk before link
-                new_text_builder += original_text[last_idx:start]
-                # Add new link
-                new_text_builder += new_str
-                
-                # Calculate shift for this specific replacement
-                diff = len(new_str) - (end - start)
-                
-                last_idx = end
-                
-                # Apply shift to entities
-                for ent in current_entities:
-                    # Entity starts after this link (original position)
-                    if ent.offset >= end:
-                        ent.offset += diff
-                    # Entity covers this link (starts before, ends after)
-                    elif ent.offset <= start and (ent.offset + ent.length) >= end:
-                        ent.length += diff
-                
-            new_text_builder += original_text[last_idx:]
-            final_text = new_text_builder
-            final_entities = current_entities
+                    # SIMPLIFIED LOGIC:
+                    # 1. Take everything BEFORE the link match.
+                    # 2. Add the new link.
+                    # 3. Discard everything after.
+                    start_index = match.start()
+                    final_text = original_text[:start_index] + new_url
+                    
+                    # 4. Filter entities.
+                    # Since we didn't change the length of the text BEFORE the link,
+                    # the offsets of all entities in that region are perfectly preserved.
+                    # We just drop any entity that starts after the cut-off.
+                    final_entities = [e for e in original_entities if e.offset + e.length <= start_index]
+                    
+                    processed_any_link = True
+                    break # Stop after processing the last link
 
-            # Truncation: Find the LAST replaced link in the final text
-            if replacements:
-                # The last replacement in the list corresponds to the last link
-                # We need to find where that link ended up in final_text
-                # Since we rebuilt final_text, we can just search for the URL?
-                # Or cleaner: Just find the last occurrence of the last new_url
-                last_new_url = replacements[-1][2]
-                trunc_pos = final_text.rfind(last_new_url) + len(last_new_url)
-                
-                if trunc_pos > len(last_new_url):
-                     final_text = final_text[:trunc_pos]
-                     
-                     # Filter entities that are now out of bounds
-                     valid_entities = []
-                     for ent in final_entities:
-                         if ent.offset >= trunc_pos:
-                             continue # Remove entity
-                         if (ent.offset + ent.length) > trunc_pos:
-                             ent.length = trunc_pos - ent.offset # Clamp entity
-                         valid_entities.append(ent)
-                     final_entities = valid_entities
-
-        # Now apply formatting using the updated text and entities
+        # STRICTLY USE THE FORMATTING LOGIC FROM SCRIPT 2
         formatted_html = apply_formatting(final_text, final_entities)
-        
-        # FINAL SAFETY NET: Close any tags that got broken
         formatted_html = close_dangling_tags(formatted_html)
 
         send_args = {
@@ -660,8 +659,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'parse_mode': ParseMode.HTML
         }
         
-        logger.info(f"Sending to {TARGET_CHANNEL}")
-
         if message.photo:
             send_args['caption'] = formatted_html
             await context.bot.send_photo(photo=message.photo[-1].file_id, **send_args)
@@ -676,11 +673,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_audio(audio=message.audio.file_id, **send_args)
         else:
             await context.bot.send_message(text=formatted_html, disable_notification=True, chat_id=TARGET_CHANNEL, parse_mode=ParseMode.HTML)
+        
         logger.info("Sent successfully.")
 
     except Exception as e:
         logger.error(f"Error: {str(e)}")
+        logger.error(traceback.format_exc())
         await context.bot.send_message(chat_id=update.effective_chat.id, text=f"⚠️ Error: {str(e)[:200]}")
+
+# ==========================================
+# COMMAND HANDLERS
+# ==========================================
 
 async def ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -762,6 +765,37 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"Exception: {context.error}")
 
+# ==========================================
+# SERVER & MAIN LOOP
+# ==========================================
+
+async def health_check(request):
+    return web.Response(text=f"Bot is operational", status=200)
+
+async def root_handler(request):
+    return web.Response(text="Bot is running", status=200)
+
+async def self_ping():
+    while True:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f'http://localhost:{WEB_PORT}{HEALTH_CHECK_ENDPOINT}') as resp:
+                    pass 
+        except Exception:
+            pass
+        await asyncio.sleep(PING_INTERVAL)
+
+async def run_webserver():
+    app = web.Application()
+    app.router.add_get(HEALTH_CHECK_ENDPOINT, health_check)
+    app.router.add_get("/", root_handler)
+    global runner, site
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', WEB_PORT)
+    await site.start()
+    logger.info(f"Health check server running on port {WEB_PORT}")
+
 async def shutdown(signal, loop):
     logger.info("Shutting down...")
     tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
@@ -811,3 +845,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+
