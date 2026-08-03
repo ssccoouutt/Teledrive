@@ -23,7 +23,7 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 # ==========================================
 # CONFIGURATION
 # ==========================================
-BOT_TOKEN = "7846379611:AAFk9kkoQwsA6fCS4vF4Ltr6xn1W645nHFM"
+BOT_TOKEN = os.environ.get('BOT_TOKEN')
 TOKEN_PATH = 'token.json'
 CREDENTIALS_PATH = 'credentials.json'
 PHASE2_SOURCE = '1ixJU6s6bKbzIdsbjKDKrZYLt1nl_TSul'
